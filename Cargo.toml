@@ -1,0 +1,11 @@
+[package]
+name = "mpart-async"
+version = "0.1.0"
+authors = ["cetra3 <peter@parashift.com.au>"]
+
+[dependencies]
+bytes = "0.4.6"
+futures = "0.1.21"
+failure = "0.1.1"
+rand = "0.4"
+log = "0.4.1"
