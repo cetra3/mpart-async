@@ -11,7 +11,7 @@ readme = "README.md"
 bytes = "0.4.6"
 futures = "0.1.21"
 failure = "0.1.1"
-rand = "0.4"
+rand = "0.5"
 log = "0.4.1"
 
 [dev-dependencies]
