@@ -11,8 +11,7 @@ use bytes::{Bytes, BytesMut};
 use failure::Error as FailError;
 use futures::Stream;
 use futures::{Async, Poll};
-use rand::{thread_rng, Rng};
-
+use rand::{distributions::Alphanumeric, rngs::SmallRng, FromEntropy, Rng};
 
 #[cfg(feature = "filestream")]
 mod filestream;
@@ -213,7 +212,8 @@ impl<S> MultipartRequest<S> {
 
 impl<S> Default for MultipartRequest<S> {
     fn default() -> Self {
-        let boundary: String = thread_rng().gen_ascii_chars().take(60).collect();
+        let mut rng = SmallRng::from_entropy();
+        let boundary: String = rng.sample_iter(&Alphanumeric).take(60).collect();
 
         let items = Vec::new();
 
