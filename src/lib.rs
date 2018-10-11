@@ -212,8 +212,7 @@ impl<S> MultipartRequest<S> {
 
 impl<S> Default for MultipartRequest<S> {
     fn default() -> Self {
-        let mut rng = SmallRng::from_entropy();
-        let boundary: String = rng.sample_iter(&Alphanumeric).take(60).collect();
+        let boundary: String = SmallRng::from_entropy().sample_iter(&Alphanumeric).take(60).collect();
 
         let items = Vec::new();
 
