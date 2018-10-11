@@ -1,8 +1,8 @@
+extern crate tokio_codec;
+extern crate tokio_fs;
 
-extern crate tokio;
-
-use self::tokio::fs::file::{File, OpenFuture};
-use self::tokio::codec::{BytesCodec, FramedRead};
+use self::tokio_fs::file::{File, OpenFuture};
+use self::tokio_codec::{BytesCodec, FramedRead};
 use std::path::PathBuf;
 use futures::{task, Future, Stream, Poll, Async};
 
