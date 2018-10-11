@@ -13,7 +13,8 @@ futures = "0.1.21"
 failure = "0.1.1"
 rand = "0.5"
 log = "0.4.1"
-tokio = { version = "0.1.11", optional = true }
+tokio-codec = { version = "0.1.1", optional = true }
+tokio-fs = { version = "0.1.3", optional = true }
 
 [dev-dependencies]
 hyper = "0.12"
@@ -24,5 +25,6 @@ default = [
     "filestream"
 ]
 filestream = [
-    "tokio"
+    "tokio-codec",
+    "tokio-fs",
 ]
