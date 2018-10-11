@@ -6,11 +6,20 @@ extern crate rand;
 extern crate log;
 
 
+
 use bytes::{Bytes, BytesMut};
 use failure::Error as FailError;
 use futures::Stream;
 use futures::{Async, Poll};
 use rand::{thread_rng, Rng};
+
+
+#[cfg(feature = "filestream")]
+mod filestream;
+
+
+#[cfg(feature = "filestream")]
+pub use filestream::FileStream;
 
 
 pub struct ByteStream {
