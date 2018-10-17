@@ -45,3 +45,24 @@ impl Stream for FileStream {
         return Ok(Async::NotReady)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    extern crate tokio;
+
+    use self::tokio::runtime::Runtime;
+    use super::FileStream;
+    use futures::{Future, Stream};
+
+    #[test]
+    fn new() {
+        let mut rt = Runtime::new().expect("new rt");
+
+        let fs = FileStream::new("Cargo.toml").concat2().and_then(|bytes| {
+            assert_eq!(bytes, &include_bytes!("../Cargo.toml")[..]);
+            Ok(())
+        });
+
+        rt.block_on(fs).unwrap();
+    }
+}
