@@ -21,6 +21,7 @@ mod filestream;
 pub use filestream::FileStream;
 
 
+#[derive(Clone)]
 pub struct ByteStream {
     bytes: Option<Bytes>
 }
