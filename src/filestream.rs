@@ -1,10 +1,11 @@
-extern crate tokio_codec;
-extern crate tokio_fs;
-
-use self::tokio_codec::{BytesCodec, FramedRead};
-use self::tokio_fs::file::{File, OpenFuture};
-use futures::{task, Async, Future, Poll, Stream};
+use futures::Stream;
 use std::path::PathBuf;
+use tokio::fs::File;
+use tokio_util::codec::{BytesCodec, FramedRead};
+
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use std::io::Error;
 
@@ -13,54 +14,59 @@ use bytes::Bytes;
 // Convenience wrapper around streaming out files.  Requires tokio
 pub struct FileStream {
     inner: Option<FramedRead<File, BytesCodec>>,
-    file: OpenFuture<PathBuf>,
+    file: Pin<Box<dyn Future<Output = Result<File, Error>> + Send + Sync>>,
 }
 
 impl FileStream {
     pub fn new<P: Into<PathBuf>>(file: P) -> Self {
         FileStream {
-            file: File::open(file.into()),
+            file: Box::pin(File::open(file.into())),
             inner: None,
         }
     }
 }
 
 impl Stream for FileStream {
-    type Item = Bytes;
-    type Error = Error;
+    type Item = Result<Bytes, Error>;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         if let Some(ref mut stream) = self.inner {
-            if let Async::Ready(bytes_mut) = stream.poll()? {
-                return Ok(Async::Ready(bytes_mut.map(|bytes| bytes.into())));
-            }
+            return Pin::new(stream)
+                .poll_next(cx)
+                .map(|val| val.map(|val| val.map(|val| val.freeze())));
         } else {
-            if let Async::Ready(file) = self.file.poll()? {
-                self.inner = Some(FramedRead::new(file, BytesCodec::new()));
-                task::current().notify();
+            if let Poll::Ready(file_result) = self.file.as_mut().poll(cx) {
+                match file_result {
+                    Ok(file) => {
+                        self.inner = Some(FramedRead::new(file, BytesCodec::new()));
+                        cx.waker().wake_by_ref();
+                    }
+                    Err(err) => {
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
             }
         }
-        return Ok(Async::NotReady);
+
+        Poll::Pending
     }
 }
 
 #[cfg(test)]
 mod tests {
-    extern crate tokio;
-
-    use self::tokio::runtime::Runtime;
     use super::FileStream;
-    use futures::{Future, Stream};
+    use bytes::Bytes;
+    use std::io::Error;
+    use tokio::stream::StreamExt;
 
-    #[test]
-    fn new() {
-        let mut rt = Runtime::new().expect("new rt");
+    #[tokio::test]
+    async fn streams_file() -> Result<(), Error> {
+        let bytes = FileStream::new("Cargo.toml")
+            .collect::<Result<Bytes, Error>>()
+            .await?;
 
-        let fs = FileStream::new("Cargo.toml").concat2().and_then(|bytes| {
-            assert_eq!(bytes, &include_bytes!("../Cargo.toml")[..]);
-            Ok(())
-        });
+        assert_eq!(bytes, &include_bytes!("../Cargo.toml")[..]);
 
-        rt.block_on(fs).unwrap();
+        Ok(())
     }
 }

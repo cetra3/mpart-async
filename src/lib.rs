@@ -5,58 +5,50 @@ extern crate rand;
 #[macro_use]
 extern crate log;
 
-
-
+use std::path::PathBuf;
 use bytes::{Bytes, BytesMut};
 use failure::Error as FailError;
 use futures::Stream;
-use futures::{Async, Poll};
-use rand::{distributions::Alphanumeric, rngs::SmallRng, FromEntropy, Rng};
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 #[cfg(feature = "filestream")]
 mod filestream;
 
-
 #[cfg(feature = "filestream")]
 pub use filestream::FileStream;
 
-
 #[derive(Clone)]
 pub struct ByteStream {
-    bytes: Option<Bytes>
+    bytes: Option<Bytes>,
 }
 
 impl ByteStream {
     pub fn new(bytes: &[u8]) -> Self {
-
         let mut buf = BytesMut::new();
 
         buf.extend_from_slice(bytes);
 
         ByteStream {
-            bytes: Some(buf.freeze())
+            bytes: Some(buf.freeze()),
         }
-
     }
 }
 
-impl Stream for ByteStream
-{
-    type Item = Bytes;
-    type Error = FailError;
+impl Stream for ByteStream {
+    type Item = Result<Bytes, FailError>;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-
-        Ok(Async::Ready(self.bytes.take()))
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.as_mut().bytes.take().map(|val| Ok(val)))
     }
-
 }
 
 pub struct MultipartRequest<S> {
     boundary: String,
     items: Vec<MultipartItems<S>>,
     state: Option<State<S>>,
-    written: usize
+    written: usize,
 }
 
 enum State<S> {
@@ -144,7 +136,33 @@ impl MultipartField {
     }
 }
 
-impl<S> MultipartRequest<S> {
+#[cfg(feature = "filestream")]
+impl MultipartRequest<FileStream> {
+
+    pub fn add_file<I: Into<String>, P: Into<PathBuf>>(
+        &mut self,
+        name: I,
+        path: P,
+    ) {
+
+        let buf = path.into();
+
+        let name = name.into();
+
+        let filename = buf.file_name().expect("Should be a valid file").to_string_lossy().to_string();
+        let content_type = mime_guess::MimeGuess::from_path(&buf).first_or_octet_stream().to_string();
+        let stream = FileStream::new(buf);
+
+        self.add_stream(name, filename, content_type, stream);
+
+    }
+
+}
+
+impl<E, S> MultipartRequest<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
     pub fn new<I: Into<String>>(boundary: I) -> Self {
         let items = Vec::new();
 
@@ -154,26 +172,25 @@ impl<S> MultipartRequest<S> {
             boundary: boundary.into(),
             items,
             state,
-            written: 0
+            written: 0,
         }
     }
 
     fn next_item(&mut self) -> State<S> {
-
         match self.items.pop() {
-            Some(MultipartItems::Field(new_field)) => {
-                State::WritingField(new_field)
-            }
-            Some(MultipartItems::Stream(new_stream)) => {
-                State::WritingStreamHeader(new_stream)
-            }
-            None => {
-                State::WritingFinished
-            }
+            Some(MultipartItems::Field(new_field)) => State::WritingField(new_field),
+            Some(MultipartItems::Stream(new_stream)) => State::WritingStreamHeader(new_stream),
+            None => State::WritingFinished,
         }
     }
 
-    pub fn add_stream<I: Into<String>>(&mut self, name: I, filename: I, content_type: I, stream: S) {
+    pub fn add_stream<I: Into<String>>(
+        &mut self,
+        name: I,
+        filename: I,
+        content_type: I,
+        stream: S,
+    ) {
         let stream = MultipartStream::new(name, filename, content_type, stream);
 
         if self.state.is_some() {
@@ -181,7 +198,6 @@ impl<S> MultipartRequest<S> {
         } else {
             self.state = Some(State::WritingStreamHeader(stream));
         }
-
     }
 
     pub fn add_field<I: Into<String>>(&mut self, name: I, value: I) {
@@ -192,7 +208,6 @@ impl<S> MultipartRequest<S> {
         } else {
             self.state = Some(State::WritingField(field));
         }
-
     }
 
     pub fn get_boundary(&self) -> &str {
@@ -211,9 +226,17 @@ impl<S> MultipartRequest<S> {
     }
 }
 
-impl<S> Default for MultipartRequest<S> {
+impl<E, S> Default for MultipartRequest<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
     fn default() -> Self {
-        let boundary: String = SmallRng::from_entropy().sample_iter(&Alphanumeric).take(60).collect();
+        let mut rng = thread_rng();
+
+        let boundary: String = std::iter::repeat(())
+            .map(|()| rng.sample(Alphanumeric))
+            .take(60)
+            .collect();
 
         let items = Vec::new();
 
@@ -223,21 +246,21 @@ impl<S> Default for MultipartRequest<S> {
             boundary,
             items,
             state,
-            written: 0
+            written: 0,
         }
     }
 }
 
-impl<S> Stream for MultipartRequest<S>
+impl<E, S: Stream> Stream for MultipartRequest<S>
 where
-    S: Stream<Item = Bytes>,
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
-    type Item = Bytes;
-    type Error = S::Error;
+    type Item = Result<Bytes, E>;
 
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         debug!("Poll hit");
+
+        let self_ref = self.get_mut();
 
         let mut bytes = None;
 
@@ -245,101 +268,95 @@ where
 
         let mut waiting = false;
 
-        if let Some(state) = self.state.take() {
+        if let Some(state) = self_ref.state.take() {
             match state {
                 State::WritingStreamHeader(stream) => {
                     debug!("Writing Stream Header for:{}", &stream.filename);
-                    bytes = Some(stream.write_header(&self.boundary));
+                    bytes = Some(stream.write_header(&self_ref.boundary));
 
                     new_state = Some(State::WritingStream(stream));
                 }
                 State::WritingStream(mut stream) => {
                     debug!("Writing Stream Body for:{}", &stream.filename);
-                    match stream.stream.poll() {
-                        Ok(Async::NotReady) => {
+
+                    match Pin::new(&mut stream.stream).poll_next(cx) {
+                        Poll::Pending => {
                             waiting = true;
                             new_state = Some(State::WritingStream(stream));
-                        },
-                        Ok(Async::Ready(stream_bytes)) => {
-                            match stream_bytes {
-                                some_bytes @ Some(_) => {
-                                    bytes = some_bytes;
+                        }
+                        Poll::Ready(Some(Ok(some_bytes))) => {
+                            bytes = Some(some_bytes);
+                            new_state = Some(State::WritingStream(stream));
+                        }
+                        Poll::Ready(None) => {
+                            let mut buf = BytesMut::new();
+                            /*
+                                This is a special case that we want to include \r\n and then the next item
+                            */
+                            buf.extend_from_slice(b"\r\n");
+
+                            match self_ref.next_item() {
+                                State::WritingStreamHeader(stream) => {
+                                    debug!("Writing new Stream Header");
+                                    buf.extend_from_slice(&stream.write_header(&self_ref.boundary));
                                     new_state = Some(State::WritingStream(stream));
-                                },
-                                None => {
-                                debug!("Writing Stream Body Finished");
-
-                                    /*
-                                        This is a special case that we want to include \r\n and then the next item
-                                    */
-
-                                    //Need to add an \r\n to end of stream
-                                    let mut buf = BytesMut::new();
-
-                                    buf.extend_from_slice(b"\r\n");
-
-                                    match self.next_item() {
-                                        State::WritingStreamHeader(stream) => {
-                                            debug!("Writing new Stream Header");
-                                            buf.extend_from_slice(&stream.write_header(&self.boundary));
-                                            new_state = Some(State::WritingStream(stream));
-                                        },
-                                        State::WritingFinished => {
-                                            debug!("Writing new Stream Finished");
-                                            buf.extend_from_slice(&self.write_ending());
-                                        },
-                                        State::WritingField(field) => {
-                                            debug!("Writing new Stream Field");
-                                            buf.extend_from_slice(&field.get_bytes(&self.boundary));
-                                            new_state = Some(self.next_item());
-                                        },
-                                        _ => ()
-                                    }
-
-                                    bytes = Some(buf.freeze())
                                 }
+                                State::WritingFinished => {
+                                    debug!("Writing new Stream Finished");
+                                    buf.extend_from_slice(&self_ref.write_ending());
+                                }
+                                State::WritingField(field) => {
+                                    debug!("Writing new Stream Field");
+                                    buf.extend_from_slice(&field.get_bytes(&self_ref.boundary));
+                                    new_state = Some(self_ref.next_item());
+                                }
+                                _ => (),
                             }
 
+                            bytes = Some(buf.freeze())
                         }
-                        Err(err) => {
-                            return Err(err)
-                        }
+                        an_error @ Poll::Ready(Some(Err(_))) => return an_error,
                     }
-
                 }
                 State::WritingFinished => {
                     debug!("Writing Stream Finished");
-                    bytes = Some(self.write_ending());
+                    bytes = Some(self_ref.write_ending());
                 }
                 State::WritingField(field) => {
                     debug!("Writing Field: {}", &field.name);
-                    bytes = Some(field.get_bytes(&self.boundary));
-                    new_state = Some(self.next_item());
+                    bytes = Some(field.get_bytes(&self_ref.boundary));
+                    new_state = Some(self_ref.next_item());
                 }
             }
         }
 
         if let Some(state) = new_state {
-            self.state = Some(state);
+            self_ref.state = Some(state);
         }
 
         if waiting {
-            return Ok(Async::NotReady)
+            return Poll::Pending;
         }
 
         if let Some(ref bytes) = bytes {
             debug!("Bytes: {}", bytes.len());
-            self.written += bytes.len();
+            self_ref.written += bytes.len();
         } else {
-            debug!("No bytes to write, finished stream, total bytes:{}", self.written);
+            debug!(
+                "No bytes to write, finished stream, total bytes:{}",
+                self_ref.written
+            );
         }
-        return Ok(Async::Ready(bytes));
+
+        return Poll::Ready(bytes.map(|bytes| Ok(bytes)));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::executor::block_on;
+    use futures::{future, StreamExt};
 
     #[test]
     fn sets_boundary() {
@@ -392,13 +409,13 @@ mod tests {
                 value2\r\n\
                 --AaB03x--\r\n";
 
-        let output = req.wait().fold(BytesMut::new(), |mut buf, result| {
+        let output = block_on(req.fold(BytesMut::new(), |mut buf, result| {
             if let Ok(bytes) = result {
                 buf.extend_from_slice(&bytes);
             };
 
-            buf
-        });
+            future::ready(buf)
+        }));
 
         assert_eq!(&output[..], input);
     }
@@ -418,20 +435,19 @@ mod tests {
                 Lorem Ipsum\n\r\n\
                 --AaB03x--\r\n";
 
-        let output = req.wait().fold(BytesMut::new(), |mut buf, result| {
+        let output = block_on(req.fold(BytesMut::new(), |mut buf, result| {
             if let Ok(bytes) = result {
                 buf.extend_from_slice(&bytes);
             };
 
-            buf
-        });
+            future::ready(buf)
+        }));
 
         assert_eq!(&output[..], input);
     }
 
     #[test]
     fn writes_streams_and_fields() {
-
         let mut req: MultipartRequest<ByteStream> = MultipartRequest::new("AaB03x");
 
         let stream = ByteStream::new(b"Lorem Ipsum\n");
@@ -455,17 +471,14 @@ mod tests {
                 value2\r\n\
                 --AaB03x--\r\n";
 
-        let output = req.wait().fold(BytesMut::new(), |mut buf, result| {
+        let output = block_on(req.fold(BytesMut::new(), |mut buf, result| {
             if let Ok(bytes) = result {
                 buf.extend_from_slice(&bytes);
             };
 
-            buf
-        });
+            future::ready(buf)
+        }));
 
         assert_eq!(&output[..], input);
-
     }
-   
-
 }
