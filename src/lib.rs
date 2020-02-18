@@ -1,23 +1,26 @@
 extern crate bytes;
-extern crate failure;
 extern crate futures;
 extern crate rand;
 #[macro_use]
 extern crate log;
 
-use std::path::PathBuf;
+use anyhow::Error as FailError;
 use bytes::{Bytes, BytesMut};
-use failure::Error as FailError;
 use futures::Stream;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+
+mod server;
 
 #[cfg(feature = "filestream")]
 mod filestream;
 
 #[cfg(feature = "filestream")]
 pub use filestream::FileStream;
+
+pub use server::{MpartParser, ParseOutput};
 
 #[derive(Clone)]
 pub struct ByteStream {
@@ -58,7 +61,7 @@ enum State<S> {
     WritingFinished,
 }
 
-enum MultipartItems<S> {
+pub enum MultipartItems<S> {
     Field(MultipartField),
     Stream(MultipartStream<S>),
 }
@@ -138,25 +141,23 @@ impl MultipartField {
 
 #[cfg(feature = "filestream")]
 impl MultipartRequest<FileStream> {
-
-    pub fn add_file<I: Into<String>, P: Into<PathBuf>>(
-        &mut self,
-        name: I,
-        path: P,
-    ) {
-
+    pub fn add_file<I: Into<String>, P: Into<PathBuf>>(&mut self, name: I, path: P) {
         let buf = path.into();
 
         let name = name.into();
 
-        let filename = buf.file_name().expect("Should be a valid file").to_string_lossy().to_string();
-        let content_type = mime_guess::MimeGuess::from_path(&buf).first_or_octet_stream().to_string();
+        let filename = buf
+            .file_name()
+            .expect("Should be a valid file")
+            .to_string_lossy()
+            .to_string();
+        let content_type = mime_guess::MimeGuess::from_path(&buf)
+            .first_or_octet_stream()
+            .to_string();
         let stream = FileStream::new(buf);
 
         self.add_stream(name, filename, content_type, stream);
-
     }
-
 }
 
 impl<E, S> MultipartRequest<S>
