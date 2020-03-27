@@ -134,13 +134,30 @@ where
     next_item: Option<HeaderMap<HeaderValue>>,
 }
 
-struct MpartStream<S, E>
+pub struct MpartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
     state: Rc<RefCell<MpartState<S, E>>>,
 }
+
+
+impl<S, E> MpartStream<S, E>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: Into<anyhow::Error>,
+{
+    pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
+        Self {
+            state: Rc::new(RefCell::new(MpartState {
+                parser: MpartParser::new(boundary, stream),
+                next_item: None
+            }))
+        }
+    }
+}
+
 
 impl<S, E> Stream for MpartStream<S, E>
 where
@@ -437,6 +454,40 @@ mod tests {
     use crate::ByteStream;
     use futures::executor::block_on;
     use futures::StreamExt;
+
+    #[test]
+    fn read_stream() {
+        let input: &[u8] = b"--AaB03x\r\n\
+                Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
+                Content-Type: text/plain\r\n\
+                \r\n\
+                Lorem Ipsum\n\r\n\
+                --AaB03x\r\n\
+                Content-Disposition: form-data; name=\"name1\"\r\n\
+                \r\n\
+                value1\r\n\
+                --AaB03x\r\n\
+                Content-Disposition: form-data; name=\"name2\"\r\n\
+                \r\n\
+                value2\r\n\
+                --AaB03x--\r\n";
+
+        let mut stream = MpartStream::new("AaB03x", ByteStream::new(input));
+
+
+        if let Some(Ok(mut mpart_field)) = block_on(stream.next()) {
+            assert_eq!(mpart_field.name().ok(), Some("file"));
+            assert_eq!(mpart_field.filename().ok(), Some("text.txt"));
+
+            if let Some(Ok(bytes)) = block_on(mpart_field.next()) {
+                assert_eq!(bytes, Bytes::from(b"Lorem Ipsum\n" as &[u8]));
+            }
+
+        } else {
+            panic!("First value should be a field")
+        }
+
+    }
 
     #[test]
     fn read_filename() {
