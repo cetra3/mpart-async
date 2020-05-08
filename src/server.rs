@@ -2,10 +2,9 @@ use bytes::Bytes;
 use futures::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
-use std::cell::RefCell;
 use std::mem;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use thiserror::Error;
 
@@ -17,7 +16,7 @@ where
     E: Into<anyhow::Error>,
 {
     headers: HeaderMap<HeaderValue>,
-    state: Rc<RefCell<MpartState<S, E>>>,
+    state: Arc<Mutex<MpartState<S, E>>>,
 }
 
 impl<S, E> MpartField<S, E>
@@ -104,7 +103,7 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let self_mut = &mut self.as_mut();
 
-        let state = &mut self_mut.state.try_borrow_mut()?;
+        let state = &mut self_mut.state.try_lock().map_err(|_| MultipartError::InternalBorrowError)?;
 
         match Pin::new(&mut state.parser).poll_next(cx) {
             Poll::Pending => return Poll::Pending,
@@ -139,7 +138,7 @@ where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
-    state: Rc<RefCell<MpartState<S, E>>>,
+    state: Arc<Mutex<MpartState<S, E>>>,
 }
 
 
@@ -150,7 +149,7 @@ where
 {
     pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
         Self {
-            state: Rc::new(RefCell::new(MpartState {
+            state: Arc::new(Mutex::new(MpartState {
                 parser: MpartParser::new(boundary, stream),
                 next_item: None
             }))
@@ -169,7 +168,7 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let self_mut = &mut self.as_mut();
 
-        let state = &mut self_mut.state.try_borrow_mut()?;
+        let state = &mut self_mut.state.try_lock().map_err(|_| MultipartError::InternalBorrowError)?;
 
         if let Some(headers) = state.next_item.take() {
             return Poll::Ready(Some(Ok(MpartField {
@@ -212,8 +211,10 @@ pub enum MultipartError {
         "Tried to poll an MpartStream when the MpartField should be polled, try using `flatten()`"
     )]
     ShouldPollField,
-    #[error(transparent)]
-    InternalBorrowError(#[from] std::cell::BorrowMutError),
+    #[error(
+        "Tried to poll an MpartField and the Mutex has already been locked"
+    )]
+    InternalBorrowError,
     #[error(transparent)]
     HeaderParse(#[from] httparse::Error),
     #[error(transparent)]
