@@ -20,7 +20,7 @@ mod filestream;
 #[cfg(feature = "filestream")]
 pub use filestream::FileStream;
 
-pub use server::{MpartStream, MpartField, MpartParser, ParseOutput};
+pub use server::{MpartField, MpartParser, MpartStream, ParseOutput};
 
 #[derive(Clone)]
 pub struct ByteStream {

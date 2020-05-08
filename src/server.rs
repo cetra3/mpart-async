@@ -24,27 +24,23 @@ where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
-
     pub fn headers(&self) -> &HeaderMap<HeaderValue> {
         &self.headers
     }
 
     pub fn content_type<'a>(&'a self) -> Result<&'a str, MultipartError> {
-
         if let Some(val) = self.headers.get("content-type") {
-            return val.to_str().map_err(|_| MultipartError::InvalidHeader)
+            return val.to_str().map_err(|_| MultipartError::InvalidHeader);
         }
 
         Err(MultipartError::InvalidHeader)
-
     }
 
     pub fn filename<'a>(&'a self) -> Result<&'a str, MultipartError> {
-
         if let Some(val) = self.headers.get("content-disposition") {
             let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "filename") {
-                return Ok(filename)
+                return Ok(filename);
             }
         }
 
@@ -52,44 +48,33 @@ where
     }
 
     pub fn name<'a>(&'a self) -> Result<&'a str, MultipartError> {
-
         if let Some(val) = self.headers.get("content-disposition") {
             let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "name") {
-                return Ok(filename)
+                return Ok(filename);
             }
         }
 
         Err(MultipartError::InvalidHeader)
     }
-    
-
 }
 
 fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<&'a str> {
-
-
     if let Some(start_idx) = input.find(&param) {
         let end_param = start_idx + param.len();
         //check bounds
         if input.len() > end_param + 2 {
             if &input[end_param..end_param + 2] == "=\"" {
-
                 let start = end_param + 2;
 
                 if let Some(end) = &input[start..].find("\"") {
-                    return Some(&input[start..start + end])
+                    return Some(&input[start..start + end]);
                 }
-
-
-
             }
         }
     }
 
-    return None
-
-
+    return None;
 }
 
 //Streams out bytes
@@ -103,7 +88,10 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let self_mut = &mut self.as_mut();
 
-        let state = &mut self_mut.state.try_lock().map_err(|_| MultipartError::InternalBorrowError)?;
+        let state = &mut self_mut
+            .state
+            .try_lock()
+            .map_err(|_| MultipartError::InternalBorrowError)?;
 
         match Pin::new(&mut state.parser).poll_next(cx) {
             Poll::Pending => return Poll::Pending,
@@ -141,7 +129,6 @@ where
     state: Arc<Mutex<MpartState<S, E>>>,
 }
 
-
 impl<S, E> MpartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -151,12 +138,11 @@ where
         Self {
             state: Arc::new(Mutex::new(MpartState {
                 parser: MpartParser::new(boundary, stream),
-                next_item: None
-            }))
+                next_item: None,
+            })),
         }
     }
 }
-
 
 impl<S, E> Stream for MpartStream<S, E>
 where
@@ -168,7 +154,10 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let self_mut = &mut self.as_mut();
 
-        let state = &mut self_mut.state.try_lock().map_err(|_| MultipartError::InternalBorrowError)?;
+        let state = &mut self_mut
+            .state
+            .try_lock()
+            .map_err(|_| MultipartError::InternalBorrowError)?;
 
         if let Some(headers) = state.next_item.take() {
             return Poll::Ready(Some(Ok(MpartField {
@@ -211,9 +200,7 @@ pub enum MultipartError {
         "Tried to poll an MpartStream when the MpartField should be polled, try using `flatten()`"
     )]
     ShouldPollField,
-    #[error(
-        "Tried to poll an MpartField and the Mutex has already been locked"
-    )]
+    #[error("Tried to poll an MpartField and the Mutex has already been locked")]
     InternalBorrowError,
     #[error(transparent)]
     HeaderParse(#[from] httparse::Error),
@@ -475,7 +462,6 @@ mod tests {
 
         let mut stream = MpartStream::new("AaB03x", ByteStream::new(input));
 
-
         if let Some(Ok(mut mpart_field)) = block_on(stream.next()) {
             assert_eq!(mpart_field.name().ok(), Some("file"));
             assert_eq!(mpart_field.filename().ok(), Some("text.txt"));
@@ -483,11 +469,9 @@ mod tests {
             if let Some(Ok(bytes)) = block_on(mpart_field.next()) {
                 assert_eq!(bytes, Bytes::from(b"Lorem Ipsum\n" as &[u8]));
             }
-
         } else {
             panic!("First value should be a field")
         }
-
     }
 
     #[test]
@@ -498,7 +482,6 @@ mod tests {
 
         assert_eq!(name, Some("file"));
         assert_eq!(filename, Some("text.txt"));
-
     }
 
     #[test]
