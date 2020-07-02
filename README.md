@@ -1,94 +1,105 @@
 # Rust Multipart Async
 
-This crate allows the creation of client multipart streams for use with the futures-fs ecosystem.
+This crate allows the creation of client/server multipart streams for use with std futures.
 
 ## Quick Usage
 
-### Actix Web > 0.6
+
+With clients, you want to create a `MultipartRequest` & add in your fields & files.
+
+
+### Hyper Client Example
+
+Here is an example of how to use the client with hyper:
 
 ```rust
-/*
-This method receives a pure binary body and converts it into a multipart request
-*/
-fn handle_put<S: 'static>(req: HttpRequest<S>, url: &str) -> Box<Future<Item = HttpResponse, Error = Error>> {
+use anyhow::Error;
 
-    let mut builder = client::ClientRequest::build();
+use hyper::{header::CONTENT_TYPE, Body, Client, Request};
+use hyper::{service::make_service_fn, service::service_fn, Response, Server};
+use mpart_async::MultipartRequest;
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    //Setup a mock server to accept connections.
+    setup_server();
+
+    let client = Client::new();
 
     let mut mpart = MultipartRequest::default();
 
-    let content_type = req.headers()
-        .get(CONTENT_TYPE)
-        .and_then(|val| val.to_str().ok())
-        .unwrap_or("application/octet-stream")
-        .to_string();
+    mpart.add_field("foo", "bar");
+    mpart.add_file("test", "Cargo.toml");
 
-    let file_name = "example_file.bin";
+    let request = Request::post("http://localhost:3000")
+        .header(
+            CONTENT_TYPE,
+            format!("multipart/form-data; boundary={}", mpart.get_boundary()),
+        )
+        .body(Body::wrap_stream(mpart))?;
 
-    mpart.add_stream(
-        "content",
-        file_name,
-        &content_type,
-        req.map_err(|err| err_msg(err)),
-    );
+    client.request(request).await?;
 
-    mpart.add_field("name", file_name);
-    mpart.add_field("type", "content");
+    Ok(())
+}
 
-    builder.header(
-        CONTENT_TYPE,
-        format!("multipart/form-data; boundary={}", mpart.get_boundary()),
-    );
+fn setup_server() {
+    let addr = ([127, 0, 0, 1], 3000).into();
+    let make_svc = make_service_fn(|_conn| async { Ok::<_, Error>(service_fn(mock)) });
+    let server = Server::bind(&addr).serve(make_svc);
 
-    builder
-        .uri(&url)
-        .method(Method::POST)
-        .body(Body::Streaming(Box::new(mpart.from_err())))
-        .unwrap()
-        .send()
-        .timeout(Duration::from_secs(600))
-        .from_err()
-        .and_then(|resp| Ok(HttpResponse::build(resp.status()).finish()))
-        .responder()
+    tokio::spawn(server);
+}
+
+async fn mock(_: Request<Body>) -> Result<Response<Body>, Error> {
+    Ok(Response::new(Body::from("")))
 }
 ```
 
-### Hyper > 0.11
+### Warp Server Example
 
-* Create an mpart struct
-* Set the boundary header
-* Use the Body::pair method to stream it out
+Here is an example of using it with the warp server:
 
 ```rust
+use warp::Filter;
 
-//Creates a multipart request with a randomly generated boundary
-let mut mpart = MultipartRequest::default();
+use bytes::Buf;
+use futures::stream::TryStreamExt;
+use futures::Stream;
+use mime::Mime;
+use mpart_async::MpartStream;
+use std::convert::Infallible;
 
-//Adds a Text Field to the multipart form
-mpart.add_field("key", "value");
+#[tokio::main]
+async fn main() {
+    // Match any request and return hello world!
+    let routes = warp::any()
+        .and(warp::header::<Mime>("content-type"))
+        .and(warp::body::stream())
+        .and_then(mpart);
 
-let mut request: Request<Body> = Request::new(Method::Post, request_url.parse()?);
-
-{
-    let headers = request.headers_mut();
-    let mime = format!("multipart/form-data; boundary={}", mpart.get_boundary());
-    
-    //make sure you set the boundary header
-    headers.set(ContentType(mime::Mime::from_str(&mime).unwrap()));
+    warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
 }
 
-let (tx, body) = Body::pair();
+async fn mpart(
+    mime: Mime,
+    body: impl Stream<Item = Result<impl Buf, warp::Error>> + Unpin,
+) -> Result<impl warp::Reply, Infallible> {
+    let boundary = mime.get_param("boundary").map(|v| v.to_string()).unwrap();
 
-let file_stream = mpart
-    .map(|bytes| Ok(hyper::Chunk::from(bytes)))
-    .map_err(|err| {
-        error!("Could not stream file: {}", err);
-        //Waiting for https://github.com/alexcrichton/futures-rs/issues/587
-        unimplemented!()
-    });
+    let mut stream = MpartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
 
-handle.spawn(tx.send_all(file_stream).map(|_| ()).map_err(|_| ()));
+    while let Ok(Some(mut field)) = stream.try_next().await {
+        println!("Field received:{}", field.name().unwrap());
+        if let Ok(filename) = field.filename() {
+            println!("Field filename:{}", filename);
+        }
 
-request.set_body(body);
+        while let Ok(Some(bytes)) = field.try_next().await {
+            println!("Bytes received:{}", bytes.len());
+        }
+    }
+
+    Ok(format!("Thanks!\n"))
+}
 ```
-
-

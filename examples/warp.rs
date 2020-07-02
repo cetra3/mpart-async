@@ -4,7 +4,7 @@ use bytes::Buf;
 use futures::stream::TryStreamExt;
 use futures::Stream;
 use mime::Mime;
-use mpart_async::MpartStream;
+use mpart_async::server::MultipartStream;
 use std::convert::Infallible;
 
 #[tokio::main]
@@ -24,7 +24,7 @@ async fn mpart(
 ) -> Result<impl warp::Reply, Infallible> {
     let boundary = mime.get_param("boundary").map(|v| v.to_string()).unwrap();
 
-    let mut stream = MpartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
+    let mut stream = MultipartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
 
     while let Ok(Some(mut field)) = stream.try_next().await {
         println!("Field received:{}", field.name().unwrap());

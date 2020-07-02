@@ -10,16 +10,16 @@ use thiserror::Error;
 
 use twoway::find_bytes;
 
-pub struct MpartField<S, E>
+pub struct MultipartField<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
     headers: HeaderMap<HeaderValue>,
-    state: Arc<Mutex<MpartState<S, E>>>,
+    state: Arc<Mutex<MultipartState<S, E>>>,
 }
 
-impl<S, E> MpartField<S, E>
+impl<S, E> MultipartField<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
@@ -78,7 +78,7 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<&'a str> {
 }
 
 //Streams out bytes
-impl<S, E> Stream for MpartField<S, E>
+impl<S, E> Stream for MultipartField<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
@@ -112,44 +112,45 @@ where
 }
 
 //This is our state we use to drive the parser.  The `next_item` is there just for headers if there are more in the request
-struct MpartState<S, E>
+struct MultipartState<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
-    parser: MpartParser<S, E>,
+    parser: MultipartParser<S, E>,
     next_item: Option<HeaderMap<HeaderValue>>,
 }
 
-pub struct MpartStream<S, E>
+pub struct MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
-    state: Arc<Mutex<MpartState<S, E>>>,
+    state: Arc<Mutex<MultipartState<S, E>>>,
 }
 
-impl<S, E> MpartStream<S, E>
+impl<S, E> MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
+    /// Construct a MultipartStream given a boundary
     pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
         Self {
-            state: Arc::new(Mutex::new(MpartState {
-                parser: MpartParser::new(boundary, stream),
+            state: Arc::new(Mutex::new(MultipartState {
+                parser: MultipartParser::new(boundary, stream),
                 next_item: None,
             })),
         }
     }
 }
 
-impl<S, E> Stream for MpartStream<S, E>
+impl<S, E> Stream for MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
 {
-    type Item = Result<MpartField<S, E>, MultipartError>;
+    type Item = Result<MultipartField<S, E>, MultipartError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let self_mut = &mut self.as_mut();
@@ -160,7 +161,7 @@ where
             .map_err(|_| MultipartError::InternalBorrowError)?;
 
         if let Some(headers) = state.next_item.take() {
-            return Poll::Ready(Some(Ok(MpartField {
+            return Poll::Ready(Some(Ok(MultipartField {
                 headers,
                 state: self_mut.state.clone(),
             })));
@@ -175,7 +176,7 @@ where
 
             //If we have headers, we have reached the next file
             Poll::Ready(Some(Ok(ParseOutput::Headers(headers)))) => {
-                return Poll::Ready(Some(Ok(MpartField {
+                return Poll::Ready(Some(Ok(MultipartField {
                     headers,
                     state: self_mut.state.clone(),
                 })));
@@ -197,10 +198,10 @@ pub enum MultipartError {
     #[error("Invalid Header Value")]
     InvalidHeader,
     #[error(
-        "Tried to poll an MpartStream when the MpartField should be polled, try using `flatten()`"
+        "Tried to poll an MultipartStream when the MultipartField should be polled, try using `flatten()`"
     )]
     ShouldPollField,
-    #[error("Tried to poll an MpartField and the Mutex has already been locked")]
+    #[error("Tried to poll an MultipartField and the Mutex has already been locked")]
     InternalBorrowError,
     #[error(transparent)]
     HeaderParse(#[from] httparse::Error),
@@ -209,7 +210,7 @@ pub enum MultipartError {
 }
 
 //This parses the multipart and then streams out headers & bytes
-pub struct MpartParser<S, E>
+pub struct MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
@@ -221,7 +222,7 @@ where
     stream: S,
 }
 
-impl<S, E> MpartParser<S, E>
+impl<S, E> MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
@@ -272,7 +273,7 @@ fn get_headers(buffer: &[u8]) -> Result<HeaderMap<HeaderValue>, MultipartError> 
     Ok(header_map)
 }
 
-impl<S, E> Stream for MpartParser<S, E>
+impl<S, E> Stream for MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<anyhow::Error>,
@@ -439,7 +440,7 @@ pub enum ParseOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ByteStream;
+    use crate::client::ByteStream;
     use futures::executor::block_on;
     use futures::StreamExt;
 
@@ -460,7 +461,7 @@ mod tests {
                 value2\r\n\
                 --AaB03x--\r\n";
 
-        let mut stream = MpartStream::new("AaB03x", ByteStream::new(input));
+        let mut stream = MultipartStream::new("AaB03x", ByteStream::new(input));
 
         if let Some(Ok(mut mpart_field)) = block_on(stream.next()) {
             assert_eq!(mpart_field.name().ok(), Some("file"));
@@ -501,7 +502,7 @@ mod tests {
                 value2\r\n\
                 --AaB03x--\r\n";
 
-        let mut read = MpartParser::new("AaB03x", ByteStream::new(input));
+        let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
         if let Some(Ok(ParseOutput::Headers(val))) = block_on(read.next()) {
             println!("Headers:{:?}", val);
@@ -547,7 +548,7 @@ mod tests {
         let input: &[u8] = b"--AaB03x\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
                 Content-Type: text/plain";
-        let mut read = MpartParser::new("AaB03x", ByteStream::new(input));
+        let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
         assert!(block_on(read.next()).is_none());
     }
@@ -561,7 +562,7 @@ mod tests {
                 --AaB03x\r\n\
                 Content-Disposition: form-data; name=\"name1\"";
 
-        let mut read = MpartParser::new("AaB03x", ByteStream::new(input));
+        let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
         if let Some(Ok(ParseOutput::Headers(val))) = block_on(read.next()) {
             println!("Headers:{:?}", val);
@@ -583,7 +584,7 @@ mod tests {
                 I am a bad header\r\n\
                 \r\n";
 
-        let mut read = MpartParser::new("AaB03x", ByteStream::new(input));
+        let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
         let val = block_on(read.next()).unwrap();
 
@@ -607,7 +608,7 @@ mod tests {
                 Lorem Ipsum\n\r\n\
                 --InvalidBoundary--\r\n";
 
-        let mut read = MpartParser::new("AaB03x", ByteStream::new(input));
+        let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
         let val = block_on(read.next()).unwrap();
 
