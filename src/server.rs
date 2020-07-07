@@ -213,6 +213,8 @@ pub enum MultipartError {
     EOFWhileReadingBoundary,
     #[error("EOF while reading body")]
     EOFWhileReadingBody,
+    #[error("Garbage following boundary: {0:02x?}")]
+    GarbageAfterBoundary([u8; 2]),
 }
 
 //This parses the multipart and then streams out headers & bytes
@@ -422,6 +424,13 @@ where
                                 return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(
                                     mem::replace(&mut self_mut.buffer, Vec::new()),
                                 )))));
+                            } else {
+                                return Poll::Ready(Some(Err(
+                                    MultipartError::GarbageAfterBoundary([
+                                        after_boundary[0],
+                                        after_boundary[1],
+                                    ]),
+                                )));
                             }
                         } else {
                             let mut buffer = self_mut.buffer.split_off(idx + 1);
@@ -567,7 +576,13 @@ mod tests {
                 Content-Type: text/plain";
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        assert!(block_on(read.next()).is_none());
+        let ret = block_on(read.next());
+
+        assert!(
+            matches!(ret, Some(Err(MultipartError::EOFWhileReadingHeaders))),
+            "{:?}",
+            ret
+        );
     }
     #[test]
     fn unfinished_second_header() {
@@ -593,7 +608,13 @@ mod tests {
             panic!("Second value should be bytes")
         }
 
-        assert!(block_on(read.next()).is_none());
+        let ret = block_on(read.next());
+
+        assert!(
+            matches!(ret, Some(Err(MultipartError::EOFWhileReadingHeaders))),
+            "{:?}",
+            ret
+        );
     }
     #[test]
     fn invalid_header() {
