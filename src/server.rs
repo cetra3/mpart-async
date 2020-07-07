@@ -410,11 +410,15 @@ where
                                 mem::replace(&mut self_mut.buffer, Vec::new()),
                             )))));
                         }
+                    } else {
+                        let mut buffer = self_mut.buffer.split_off(idx + 1);
+                        mem::swap(&mut self_mut.buffer, &mut buffer);
+                        return Poll::Ready(Some(Ok(ParseOutput::Bytes(buffer.into()))));
                     }
                 }
 
                 //If we didn't find an `\r` in any of the multiparts, just take out the buffer and return as bytes
-                let buffer = mem::replace(&mut self_mut.buffer, Vec::new());
+                let buffer = mem::take(&mut self_mut.buffer);
 
                 return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(buffer)))));
             }
