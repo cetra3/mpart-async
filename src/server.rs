@@ -622,4 +622,48 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn zero_read() {
+        use bytes::{BufMut, BytesMut};
+
+        let input = b"\
+----------------------------332056022174478975396798\r\n\
+Content-Disposition: form-data; name=\"file\"\r\n\
+Content-Type: application/octet-stream\r\n\
+\r\n\
+\r\n\
+\r\n\
+dolphin\n\
+whale\r\n\
+----------------------------332056022174478975396798--\r\n";
+
+        let boundary = "--------------------------332056022174478975396798";
+
+        let mut read = MultipartStream::new(boundary, ByteStream::new(input));
+
+        let mut part = match block_on(read.next()).unwrap() {
+            Ok(mf) => {
+                assert_eq!(mf.name().unwrap(), "file");
+                assert_eq!(mf.content_type().unwrap(), "application/octet-stream");
+                mf
+            }
+            Err(e) => panic!("unexpected: {}", e),
+        };
+
+        let mut buffer = BytesMut::new();
+
+        loop {
+            match block_on(part.next()) {
+                Some(Ok(bytes)) => buffer.put(bytes),
+                Some(Err(e)) => panic!("unexpected {}", e),
+                None => break,
+            }
+        }
+
+        let nth = block_on(read.next());
+        assert!(nth.is_none());
+
+        assert_eq!(buffer.as_ref(), b"\r\n\r\ndolphin\nwhale");
+    }
 }
