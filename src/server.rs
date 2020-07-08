@@ -665,16 +665,15 @@ mod tests {
     fn zero_read() {
         use bytes::{BufMut, BytesMut};
 
-        let input = b"\
-----------------------------332056022174478975396798\r\n\
-Content-Disposition: form-data; name=\"file\"\r\n\
-Content-Type: application/octet-stream\r\n\
-\r\n\
-\r\n\
-\r\n\
-dolphin\n\
-whale\r\n\
-----------------------------332056022174478975396798--\r\n";
+        let input = b"----------------------------332056022174478975396798\r\n\
+                Content-Disposition: form-data; name=\"file\"\r\n\
+                Content-Type: application/octet-stream\r\n\
+                \r\n\
+                \r\n\
+                \r\n\
+                dolphin\n\
+                whale\r\n\
+                ----------------------------332056022174478975396798--\r\n";
 
         let boundary = "--------------------------332056022174478975396798";
 
