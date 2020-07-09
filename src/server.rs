@@ -207,6 +207,14 @@ pub enum MultipartError {
     HeaderParse(#[from] httparse::Error),
     #[error(transparent)]
     Stream(#[from] anyhow::Error),
+    #[error("EOF while reading headers")]
+    EOFWhileReadingHeaders,
+    #[error("EOF while reading boundary")]
+    EOFWhileReadingBoundary,
+    #[error("EOF while reading body")]
+    EOFWhileReadingBody,
+    #[error("Garbage following boundary: {0:02x?}")]
+    GarbageAfterBoundary([u8; 2]),
 }
 
 //This parses the multipart and then streams out headers & bytes
@@ -216,9 +224,9 @@ where
     E: Into<anyhow::Error>,
 {
     boundary: Bytes,
+    // FIXME: this should be BytesMut
     buffer: Vec<u8>,
     state: State,
-    stream_finished: bool,
     stream: S,
 }
 
@@ -232,18 +240,7 @@ where
             boundary: boundary.into(),
             buffer: Vec::new(),
             state: State::ReadingBoundary,
-            stream_finished: false,
             stream,
-        }
-    }
-
-    //Return a poll if the stream is finished, or pending if we're waiting for our buffer
-    fn return_poll(&mut self) -> Poll<Option<Result<ParseOutput, MultipartError>>> {
-        if self.stream_finished {
-            self.state = State::Finished;
-            return Poll::Ready(None);
-        } else {
-            return Poll::Pending;
         }
     }
 }
@@ -281,144 +278,173 @@ where
     type Item = Result<ParseOutput, MultipartError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        use futures::stream::StreamExt;
         let self_mut = &mut self.as_mut();
 
-        //The stream might be finished but we might not be
-        if !self_mut.stream_finished {
-            match Pin::new(&mut self_mut.stream).poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(Err(err))) => {
-                    return Poll::Ready(Some(Err(MultipartError::Stream(err.into()))))
-                }
-                Poll::Ready(maybe_bytes) => {
-                    match maybe_bytes {
-                        Some(Ok(bytes)) => {
-                            self_mut.buffer.extend_from_slice(&bytes);
-                        }
-                        Some(Err(_)) => {
-                            //Unreachable, covered by match statement above.
-                            unreachable!();
-                        }
-                        None => {
-                            self_mut.stream_finished = true;
+        let boundary_len = self_mut.boundary.len();
 
-                            if self_mut.buffer.len() == 0 {
-                                return Poll::Ready(None);
+        loop {
+            match self_mut.state {
+                State::ReadingBoundary => {
+                    //If the buffer is too small
+                    if self_mut.buffer.len() < boundary_len + 4 {
+                        match futures::ready!(self_mut.stream.poll_next_unpin(cx)) {
+                            Some(Ok(buffer)) => {
+                                self_mut.buffer.extend_from_slice(&buffer);
+                                continue;
+                            }
+                            Some(Err(e)) => {
+                                return Poll::Ready(Some(Err(MultipartError::Stream(e.into()))))
+                            }
+                            None => {
+                                return Poll::Ready(Some(Err(
+                                    MultipartError::EOFWhileReadingBoundary,
+                                )))
+                            }
+                        }
+                    }
+
+                    //If the buffer starts with `--<boundary>\r\n`
+                    if &self_mut.buffer[..2] == b"--"
+                        && &self_mut.buffer[2..boundary_len + 2] == &self_mut.boundary
+                        && &self_mut.buffer[boundary_len + 2..boundary_len + 4] == b"\r\n"
+                    {
+                        //remove the boundary from the buffer, returning the tail
+                        self_mut.buffer = self_mut.buffer.split_off(boundary_len + 4);
+                        self_mut.state = State::ReadingHeader;
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    } else {
+                        let expected =
+                            format!("--{}\\r\\n", String::from_utf8_lossy(&self_mut.boundary));
+                        let found = String::from_utf8_lossy(&self_mut.buffer[..boundary_len + 4])
+                            .to_string();
+
+                        let error = MultipartError::InvalidBoundary { expected, found };
+
+                        //There is some error with the boundary...
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+                State::ReadingHeader => {
+                    if let Some(end) = find_bytes(&self_mut.buffer, b"\r\n\r\n") {
+                        //Need to include the end header bytes for the parse to work
+                        let end = end + 4;
+
+                        let header_map = match get_headers(&self_mut.buffer[0..end]) {
+                            Ok(headers) => headers,
+                            Err(error) => {
+                                self_mut.state = State::Finished;
+                                return Poll::Ready(Some(Err(error)));
+                            }
+                        };
+
+                        self_mut.buffer = self_mut.buffer.split_off(end);
+
+                        self_mut.state = State::StreamingContent(self_mut.buffer.is_empty());
+                        cx.waker().wake_by_ref();
+
+                        return Poll::Ready(Some(Ok(ParseOutput::Headers(header_map))));
+                    } else {
+                        match futures::ready!(self_mut.stream.poll_next_unpin(cx)) {
+                            Some(Ok(buffer)) => {
+                                self_mut.buffer.extend_from_slice(&buffer);
+                                continue;
+                            }
+                            Some(Err(e)) => {
+                                return Poll::Ready(Some(Err(MultipartError::Stream(e.into()))))
+                            }
+                            None => {
+                                return Poll::Ready(Some(Err(
+                                    MultipartError::EOFWhileReadingHeaders,
+                                )))
                             }
                         }
                     }
                 }
-            }
-        }
 
-        let boundary_len = self_mut.boundary.len();
-
-        match self_mut.state {
-            State::ReadingBoundary => {
-                //If the buffer is too small
-                if self_mut.buffer.len() < boundary_len + 4 {
-                    return self_mut.return_poll();
-                }
-
-                //If the buffer starts with `--<boundary>\r\n`
-                if &self_mut.buffer[..2] == b"--"
-                    && &self_mut.buffer[2..boundary_len + 2] == &self_mut.boundary
-                    && &self_mut.buffer[boundary_len + 2..boundary_len + 4] == b"\r\n"
-                {
-                    //remove the boundary from the buffer, returning the tail
-                    self_mut.buffer = self_mut.buffer.split_off(boundary_len + 4);
-                    self_mut.state = State::ReadingHeader;
-                    cx.waker().wake_by_ref();
-                    return Poll::Pending;
-                } else {
-                    let expected =
-                        format!("--{}\\r\\n", String::from_utf8_lossy(&self_mut.boundary));
-                    let found =
-                        String::from_utf8_lossy(&self_mut.buffer[..boundary_len + 4]).to_string();
-
-                    let error = MultipartError::InvalidBoundary { expected, found };
-
-                    //There is some error with the boundary...
-                    return Poll::Ready(Some(Err(error)));
-                }
-            }
-            State::ReadingHeader => {
-                if let Some(end) = find_bytes(&self_mut.buffer, b"\r\n\r\n") {
-                    //Need to include the end header bytes for the parse to work
-                    let end = end + 4;
-
-                    let header_map = match get_headers(&self_mut.buffer[0..end]) {
-                        Ok(headers) => headers,
-                        Err(error) => {
-                            self_mut.state = State::Finished;
-                            return Poll::Ready(Some(Err(error)));
-                        }
-                    };
-
-                    self_mut.buffer = self_mut.buffer.split_off(end);
-
-                    self_mut.state = State::StreamingContent;
-                    cx.waker().wake_by_ref();
-
-                    return Poll::Ready(Some(Ok(ParseOutput::Headers(header_map))));
-                } else {
-                    return self_mut.return_poll();
-                }
-            }
-
-            State::StreamingContent => {
-                //We want to check the value of the buffer to see if there looks like there is an `end` boundary.
-                if let Some(idx) = find_bytes(&self_mut.buffer, b"\r") {
-                    //Check the length has enough packets for us
-                    if self_mut.buffer.len() < idx + 6 + boundary_len {
-                        //If the inner stream is finished, we should finish here too
-                        return self_mut.return_poll();
-                    }
-
-                    //The start of the boundary is 4 chars. i.e, after `\r\n--`
-                    let start_boundary = idx + 4;
-
-                    if &self_mut.buffer[idx..start_boundary] == b"\r\n--"
-                        && &self_mut.buffer[start_boundary..start_boundary + boundary_len]
-                            == self_mut.boundary
-                    {
-                        //We want the chars after the boundary basically
-                        let after_boundary = &self_mut.buffer
-                            [start_boundary + boundary_len..start_boundary + boundary_len + 2];
-
-                        if after_boundary == b"\r\n" {
-                            let mut other_bytes = self_mut.buffer.split_off(idx);
-
-                            //Remove the boundary-related bytes from the start of the buffer
-                            other_bytes = other_bytes.split_off(6 + boundary_len);
-
-                            //Return the bytes up to the boundary, we're finished and need to go back to reading headers
-                            let return_bytes =
-                                Bytes::from(mem::replace(&mut self_mut.buffer, other_bytes));
-
-                            //Replace the buffer with the extra bytes
-                            self_mut.state = State::ReadingHeader;
-                            cx.waker().wake_by_ref();
-
-                            return Poll::Ready(Some(Ok(ParseOutput::Bytes(return_bytes))));
-                        } else if after_boundary == b"--" {
-                            //We're at the end, just truncate the bytes
-                            self_mut.buffer.truncate(idx);
-                            self_mut.state = State::Finished;
-
-                            return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(
-                                mem::replace(&mut self_mut.buffer, Vec::new()),
-                            )))));
+                State::StreamingContent(exhausted) => {
+                    if self_mut.buffer.is_empty() || exhausted {
+                        self_mut.state = State::StreamingContent(false);
+                        match futures::ready!(self_mut.stream.poll_next_unpin(cx)) {
+                            Some(Ok(buffer)) => {
+                                self_mut.buffer.extend_from_slice(&buffer);
+                                continue;
+                            }
+                            Some(Err(e)) => {
+                                return Poll::Ready(Some(Err(MultipartError::Stream(e.into()))))
+                            }
+                            None => {
+                                return Poll::Ready(Some(Err(MultipartError::EOFWhileReadingBody)))
+                            }
                         }
                     }
+
+                    //We want to check the value of the buffer to see if there looks like there is an `end` boundary.
+                    if let Some(idx) = find_bytes(&self_mut.buffer, b"\r") {
+                        //Check the length has enough bytes for us
+                        if self_mut.buffer.len() < idx + 6 + boundary_len {
+                            //If the inner stream is finished, we should finish here too
+                            // FIXME: cannot stop the read successfully here!
+                            self_mut.state = State::StreamingContent(true);
+                            continue;
+                        }
+
+                        //The start of the boundary is 4 chars. i.e, after `\r\n--`
+                        let start_boundary = idx + 4;
+
+                        if &self_mut.buffer[idx..start_boundary] == b"\r\n--"
+                            && &self_mut.buffer[start_boundary..start_boundary + boundary_len]
+                                == self_mut.boundary
+                        {
+                            //We want the chars after the boundary basically
+                            let after_boundary = &self_mut.buffer
+                                [start_boundary + boundary_len..start_boundary + boundary_len + 2];
+
+                            if after_boundary == b"\r\n" {
+                                let mut other_bytes = self_mut.buffer.split_off(idx);
+
+                                //Remove the boundary-related bytes from the start of the buffer
+                                other_bytes = other_bytes.split_off(6 + boundary_len);
+
+                                //Return the bytes up to the boundary, we're finished and need to go back to reading headers
+                                let return_bytes =
+                                    Bytes::from(mem::replace(&mut self_mut.buffer, other_bytes));
+
+                                //Replace the buffer with the extra bytes
+                                self_mut.state = State::ReadingHeader;
+                                cx.waker().wake_by_ref();
+
+                                return Poll::Ready(Some(Ok(ParseOutput::Bytes(return_bytes))));
+                            } else if after_boundary == b"--" {
+                                //We're at the end, just truncate the bytes
+                                self_mut.buffer.truncate(idx);
+                                self_mut.state = State::Finished;
+
+                                return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(
+                                    mem::replace(&mut self_mut.buffer, Vec::new()),
+                                )))));
+                            } else {
+                                return Poll::Ready(Some(Err(
+                                    MultipartError::GarbageAfterBoundary([
+                                        after_boundary[0],
+                                        after_boundary[1],
+                                    ]),
+                                )));
+                            }
+                        } else {
+                            let mut buffer = self_mut.buffer.split_off(idx + 1);
+                            mem::swap(&mut self_mut.buffer, &mut buffer);
+                            return Poll::Ready(Some(Ok(ParseOutput::Bytes(buffer.into()))));
+                        }
+                    } else {
+                        //If we didn't find an `\r` in any of the multiparts, just take out the buffer and return as bytes
+                        let buffer = mem::take(&mut self_mut.buffer);
+                        return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(buffer)))));
+                    }
                 }
-
-                //If we didn't find an `\r` in any of the multiparts, just take out the buffer and return as bytes
-                let buffer = mem::replace(&mut self_mut.buffer, Vec::new());
-
-                return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(buffer)))));
+                State::Finished => return Poll::Ready(None),
             }
-            State::Finished => return Poll::Ready(None),
         }
     }
 }
@@ -427,7 +453,7 @@ where
 enum State {
     ReadingBoundary,
     ReadingHeader,
-    StreamingContent,
+    StreamingContent(bool),
     Finished,
 }
 
@@ -550,7 +576,12 @@ mod tests {
                 Content-Type: text/plain";
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        assert!(block_on(read.next()).is_none());
+        let ret = block_on(read.next());
+
+        assert!(matches!(
+            ret,
+            Some(Err(MultipartError::EOFWhileReadingHeaders))
+        ),);
     }
     #[test]
     fn unfinished_second_header() {
@@ -576,7 +607,12 @@ mod tests {
             panic!("Second value should be bytes")
         }
 
-        assert!(block_on(read.next()).is_none());
+        let ret = block_on(read.next());
+
+        assert!(matches!(
+            ret,
+            Some(Err(MultipartError::EOFWhileReadingHeaders))
+        ),);
     }
     #[test]
     fn invalid_header() {
@@ -621,5 +657,48 @@ mod tests {
                 panic!("Expecting Invalid Boundary Error, Instead got:{:?}", val);
             }
         }
+    }
+
+    #[test]
+    fn zero_read() {
+        use bytes::{BufMut, BytesMut};
+
+        let input = b"----------------------------332056022174478975396798\r\n\
+                Content-Disposition: form-data; name=\"file\"\r\n\
+                Content-Type: application/octet-stream\r\n\
+                \r\n\
+                \r\n\
+                \r\n\
+                dolphin\n\
+                whale\r\n\
+                ----------------------------332056022174478975396798--\r\n";
+
+        let boundary = "--------------------------332056022174478975396798";
+
+        let mut read = MultipartStream::new(boundary, ByteStream::new(input));
+
+        let mut part = match block_on(read.next()).unwrap() {
+            Ok(mf) => {
+                assert_eq!(mf.name().unwrap(), "file");
+                assert_eq!(mf.content_type().unwrap(), "application/octet-stream");
+                mf
+            }
+            Err(e) => panic!("unexpected: {}", e),
+        };
+
+        let mut buffer = BytesMut::new();
+
+        loop {
+            match block_on(part.next()) {
+                Some(Ok(bytes)) => buffer.put(bytes),
+                Some(Err(e)) => panic!("unexpected {}", e),
+                None => break,
+            }
+        }
+
+        let nth = block_on(read.next());
+        assert!(nth.is_none());
+
+        assert_eq!(buffer.as_ref(), b"\r\n\r\ndolphin\nwhale");
     }
 }
