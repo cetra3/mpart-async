@@ -578,11 +578,10 @@ mod tests {
 
         let ret = block_on(read.next());
 
-        assert!(
-            matches!(ret, Some(Err(MultipartError::EOFWhileReadingHeaders))),
-            "{:?}",
-            ret
-        );
+        assert!(matches!(
+            ret,
+            Some(Err(MultipartError::EOFWhileReadingHeaders))
+        ),);
     }
     #[test]
     fn unfinished_second_header() {
@@ -610,11 +609,10 @@ mod tests {
 
         let ret = block_on(read.next());
 
-        assert!(
-            matches!(ret, Some(Err(MultipartError::EOFWhileReadingHeaders))),
-            "{:?}",
-            ret
-        );
+        assert!(matches!(
+            ret,
+            Some(Err(MultipartError::EOFWhileReadingHeaders))
+        ),);
     }
     #[test]
     fn invalid_header() {
