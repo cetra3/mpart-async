@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 fn criterion_benchmark(c: &mut Criterion) {
     let boundary = b"----------------------------332056022174478975396798";
 
-    let mut buffer = Vec::with_capacity(1024 * 1024);
+    let mut buffer = Vec::with_capacity(10 * 1024 * 1024);
     buffer.extend_from_slice(b"--");
     buffer.extend_from_slice(boundary);
     buffer.extend_from_slice(b"\r\n");
@@ -26,7 +26,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     }
 
     let trailer = 2 + boundary.len() + 2;
-    let target = 1024 * 1024;
+    let target = buffer.capacity();
     let mut remaining = target - (buffer.len() + trailer);
     let zeroes_used = remaining;
 
@@ -40,30 +40,53 @@ fn criterion_benchmark(c: &mut Criterion) {
     buffer.extend_from_slice(b"\r\n--");
     buffer.extend_from_slice(boundary);
     buffer.extend_from_slice(b"--\r\n");
+
+    let boundary: Bytes = (&boundary[..]).into();
     let bytes: Bytes = buffer.into();
 
-    c.bench_function("megabyte parsing in 32 byte chunks", |b| {
-        b.iter(|| {
-            let stream = ChunkedStream(bytes.clone(), 32);
-            let mut stream = MultipartStream::new(Bytes::from(&boundary[..]), stream);
+    let mut group = c.benchmark_group("ten megabytes");
 
-            let mut field = block_on(stream.next()).unwrap().unwrap();
-            let mut bytes = 0;
-            loop {
-                match block_on(field.next()) {
-                    Some(Ok(read)) => bytes += read.len(),
-                    Some(Err(e)) => panic!("failed: {}", e),
-                    None => {
-                        assert_eq!(bytes, zeroes_used);
-                        break;
-                    }
-                }
+    // with bigger chunk sizes this does get a lot of faster, but it would perhaps be better to
+    // have multiple smaller files
+    for chunk_size in &[512] {
+        group.throughput(criterion::Throughput::Bytes(target as u64));
+
+        group.bench_with_input(
+            criterion::BenchmarkId::from_parameter(chunk_size),
+            &zeroes_used,
+            |b, &size| {
+                b.iter(|| {
+                    let bytes = black_box(count_single_field_bytes(
+                        boundary.clone(),
+                        bytes.clone(),
+                        size,
+                    ));
+
+                    assert_eq!(bytes, zeroes_used);
+                });
+            },
+        );
+    }
+}
+
+fn count_single_field_bytes(boundary: Bytes, bytes: Bytes, chunk_size: usize) -> usize {
+    let stream = ChunkedStream(bytes, chunk_size);
+    let mut stream = MultipartStream::new(boundary, stream);
+
+    let mut field = block_on(stream.next()).unwrap().unwrap();
+    let mut bytes = 0;
+    loop {
+        match block_on(field.next()) {
+            Some(Ok(read)) => bytes += read.len(),
+            Some(Err(e)) => panic!("failed: {}", e),
+            None => {
+                break;
             }
+        }
+    }
 
-            assert!(matches!(block_on(stream.next()), None));
-            black_box(bytes);
-        })
-    });
+    assert!(matches!(block_on(stream.next()), None));
+    bytes
 }
 
 struct ChunkedStream(Bytes, usize);
