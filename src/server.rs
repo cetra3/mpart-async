@@ -172,9 +172,7 @@ where
 
         match Pin::new(&mut state.parser).poll_next(cx) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Some(Err(err))) => {
-                return Poll::Ready(Some(Err(MultipartError::Stream(err.into()))))
-            }
+            Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
             Poll::Ready(None) => return Poll::Ready(None),
 
             //If we have headers, we have reached the next file
