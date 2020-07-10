@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
@@ -224,8 +224,7 @@ where
     E: Into<anyhow::Error>,
 {
     boundary: Bytes,
-    // FIXME: this should be BytesMut
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     state: State,
     stream: S,
 }
@@ -238,7 +237,7 @@ where
     pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
         Self {
             boundary: boundary.into(),
-            buffer: Vec::new(),
+            buffer: BytesMut::new(),
             state: State::ReadingBoundary,
             stream,
         }
@@ -422,7 +421,7 @@ where
                                 self_mut.state = State::Finished;
 
                                 return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(
-                                    mem::replace(&mut self_mut.buffer, Vec::new()),
+                                    mem::take(&mut self_mut.buffer),
                                 )))));
                             } else {
                                 return Poll::Ready(Some(Err(
