@@ -1,8 +1,8 @@
-use anyhow::Error as FailError;
 use bytes::{Bytes, BytesMut};
 use futures::Stream;
 use log::debug;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -25,7 +25,7 @@ impl ByteStream {
 }
 
 impl Stream for ByteStream {
-    type Item = Result<Bytes, FailError>;
+    type Item = Result<Bytes, Infallible>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.as_mut().bytes.take().map(|val| Ok(val)))

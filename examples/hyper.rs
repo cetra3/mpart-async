@@ -1,8 +1,8 @@
-use anyhow::Error;
-
 use hyper::{header::CONTENT_TYPE, Body, Client, Request};
 use hyper::{service::make_service_fn, service::service_fn, Response, Server};
 use mpart_async::client::MultipartRequest;
+
+type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {

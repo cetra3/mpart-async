@@ -2,6 +2,7 @@ use bytes::Bytes;
 use futures::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
+use std::error::Error as StdError;
 use std::mem;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -10,10 +11,12 @@ use thiserror::Error;
 
 use twoway::find_bytes;
 
+type AnyStdError = Box<dyn StdError + Send + Sync + 'static>;
+
 pub struct MultipartField<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     headers: HeaderMap<HeaderValue>,
     state: Arc<Mutex<MultipartState<S, E>>>,
@@ -22,7 +25,7 @@ where
 impl<S, E> MultipartField<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     pub fn headers(&self) -> &HeaderMap<HeaderValue> {
         &self.headers
@@ -81,7 +84,7 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<&'a str> {
 impl<S, E> Stream for MultipartField<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     type Item = Result<Bytes, MultipartError>;
 
@@ -115,7 +118,7 @@ where
 struct MultipartState<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     parser: MultipartParser<S, E>,
     next_item: Option<HeaderMap<HeaderValue>>,
@@ -124,7 +127,7 @@ where
 pub struct MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     state: Arc<Mutex<MultipartState<S, E>>>,
 }
@@ -132,7 +135,7 @@ where
 impl<S, E> MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     /// Construct a MultipartStream given a boundary
     pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
@@ -148,7 +151,7 @@ where
 impl<S, E> Stream for MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     type Item = Result<MultipartField<S, E>, MultipartError>;
 
@@ -169,9 +172,7 @@ where
 
         match Pin::new(&mut state.parser).poll_next(cx) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Some(Err(err))) => {
-                return Poll::Ready(Some(Err(MultipartError::Stream(err.into()))))
-            }
+            Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
             Poll::Ready(None) => return Poll::Ready(None),
 
             //If we have headers, we have reached the next file
@@ -206,7 +207,7 @@ pub enum MultipartError {
     #[error(transparent)]
     HeaderParse(#[from] httparse::Error),
     #[error(transparent)]
-    Stream(#[from] anyhow::Error),
+    Stream(#[from] AnyStdError),
     #[error("EOF while reading headers")]
     EOFWhileReadingHeaders,
     #[error("EOF while reading boundary")]
@@ -221,7 +222,7 @@ pub enum MultipartError {
 pub struct MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     boundary: Bytes,
     // FIXME: this should be BytesMut
@@ -233,7 +234,7 @@ where
 impl<S, E> MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
         Self {
@@ -273,7 +274,7 @@ fn get_headers(buffer: &[u8]) -> Result<HeaderMap<HeaderValue>, MultipartError> 
 impl<S, E> Stream for MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
-    E: Into<anyhow::Error>,
+    E: Into<AnyStdError>,
 {
     type Item = Result<ParseOutput, MultipartError>;
 
