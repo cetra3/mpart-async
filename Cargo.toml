@@ -26,6 +26,7 @@ hyper = "0.13"
 warp = "0.2.2"
 mime = "0.3.16"
 headers = "0.3.2"
+criterion = "0.3"
 
 [features]
 default = [
@@ -36,3 +37,7 @@ filestream = [
     "tokio-util",
     "mime_guess"
 ]
+
+[[bench]]
+name = "megabyte_parsing"
+harness = false
