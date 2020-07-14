@@ -11,13 +11,23 @@ use std::io::Error;
 
 use bytes::Bytes;
 
-// Convenience wrapper around streaming out files.  Requires tokio
+/// Convenience wrapper around streaming out files.  Requires tokio
+///
+/// You can also add this to a `MultipartRequest` using the [`add_file`](../client/struct.MultipartRequest.html#method.add_file) method:
+/// ```no_run
+/// # use mpart_async::client::MultipartRequest;
+/// # fn main() {
+/// let mut req = MultipartRequest::default();
+/// req.add_file("file", "/path/to/file");
+/// # }
+/// ```
 pub struct FileStream {
     inner: Option<FramedRead<File, BytesCodec>>,
     file: Pin<Box<dyn Future<Output = Result<File, Error>> + Send + Sync>>,
 }
 
 impl FileStream {
+    /// Create a new FileStream from a file path
     pub fn new<P: Into<PathBuf>>(file: P) -> Self {
         FileStream {
             file: Box::pin(File::open(file.into())),

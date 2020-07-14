@@ -4,20 +4,18 @@ This crate allows the creation of client/server multipart streams for use with s
 
 ## Quick Usage
 
-
 With clients, you want to create a `MultipartRequest` & add in your fields & files.
-
 
 ### Hyper Client Example
 
-Here is an example of how to use the client with hyper:
+Here is an [example](examples/hyper.rs) of how to use the client with hyper (`cargo run --example warp`):
 
 ```rust
-use anyhow::Error;
-
 use hyper::{header::CONTENT_TYPE, Body, Client, Request};
 use hyper::{service::make_service_fn, service::service_fn, Response, Server};
-use mpart_async::MultipartRequest;
+use mpart_async::client::MultipartRequest;
+
+type Error = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -58,7 +56,7 @@ async fn mock(_: Request<Body>) -> Result<Response<Body>, Error> {
 
 ### Warp Server Example
 
-Here is an example of using it with the warp server:
+Here is an [example](examples/warp.rs) of using it with the warp server (`cargo run --example warp`):
 
 ```rust
 use warp::Filter;
@@ -67,7 +65,7 @@ use bytes::Buf;
 use futures::stream::TryStreamExt;
 use futures::Stream;
 use mime::Mime;
-use mpart_async::MpartStream;
+use mpart_async::server::MultipartStream;
 use std::convert::Infallible;
 
 #[tokio::main]
@@ -87,7 +85,7 @@ async fn mpart(
 ) -> Result<impl warp::Reply, Infallible> {
     let boundary = mime.get_param("boundary").map(|v| v.to_string()).unwrap();
 
-    let mut stream = MpartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
+    let mut stream = MultipartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
 
     while let Ok(Some(mut field)) = stream.try_next().await {
         println!("Field received:{}", field.name().unwrap());

@@ -7,31 +7,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-#[derive(Clone)]
-pub struct ByteStream {
-    bytes: Option<Bytes>,
-}
-
-impl ByteStream {
-    pub fn new(bytes: &[u8]) -> Self {
-        let mut buf = BytesMut::new();
-
-        buf.extend_from_slice(bytes);
-
-        ByteStream {
-            bytes: Some(buf.freeze()),
-        }
-    }
-}
-
-impl Stream for ByteStream {
-    type Item = Result<Bytes, Infallible>;
-
-    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.as_mut().bytes.take().map(|val| Ok(val)))
-    }
-}
-
+/// The main `MultipartRequest` struct for sending Multipart submissions to servers
 pub struct MultipartRequest<S> {
     boundary: String,
     items: Vec<MultipartItems<S>>,
@@ -46,11 +22,15 @@ enum State<S> {
     WritingFinished,
 }
 
+/// The enum for multipart items which is either a field or a stream
 pub enum MultipartItems<S> {
+    /// MultipartField variant
     Field(MultipartField),
+    /// MultipartStream variant
     Stream(MultipartStream<S>),
 }
 
+/// A stream which is part of a `MultipartRequest` and used to stream out bytes
 pub struct MultipartStream<S> {
     name: String,
     filename: String,
@@ -58,12 +38,14 @@ pub struct MultipartStream<S> {
     stream: S,
 }
 
+/// A MultipartField which is part of a `MultipartRequest` and used to add a standard text field
 pub struct MultipartField {
     name: String,
     value: String,
 }
 
 impl<S> MultipartStream<S> {
+    /// Construct a new MultipartStream providing name, filename & content_type
     pub fn new<I: Into<String>>(name: I, filename: I, content_type: I, stream: S) -> Self {
         MultipartStream {
             name: name.into(),
@@ -73,7 +55,7 @@ impl<S> MultipartStream<S> {
         }
     }
 
-    pub fn write_header(&self, boundary: &str) -> Bytes {
+    fn write_header(&self, boundary: &str) -> Bytes {
         let mut buf = BytesMut::new();
 
         buf.extend_from_slice(b"--");
@@ -96,6 +78,7 @@ impl<S> MultipartStream<S> {
 }
 
 impl MultipartField {
+    /// Construct a new MultipartField given a name and value
     pub fn new<I: Into<String>>(name: I, value: I) -> Self {
         MultipartField {
             name: name.into(),
@@ -124,34 +107,13 @@ impl MultipartField {
     }
 }
 
-#[cfg(feature = "filestream")]
-use crate::filestream::FileStream;
-
-#[cfg(feature = "filestream")]
-impl MultipartRequest<FileStream> {
-    pub fn add_file<I: Into<String>, P: Into<PathBuf>>(&mut self, name: I, path: P) {
-        let buf = path.into();
-
-        let name = name.into();
-
-        let filename = buf
-            .file_name()
-            .expect("Should be a valid file")
-            .to_string_lossy()
-            .to_string();
-        let content_type = mime_guess::MimeGuess::from_path(&buf)
-            .first_or_octet_stream()
-            .to_string();
-        let stream = FileStream::new(buf);
-
-        self.add_stream(name, filename, content_type, stream);
-    }
-}
-
 impl<E, S> MultipartRequest<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
+    /// Construct a new MultipartRequest with a given Boundary
+    ///
+    /// If you want a boundary generated automatically, then you can use `MultipartRequest::default()`
     pub fn new<I: Into<String>>(boundary: I) -> Self {
         let items = Vec::new();
 
@@ -173,6 +135,9 @@ where
         }
     }
 
+    /// Add a raw Stream to the Multipart request
+    ///
+    /// The Stream should return items of `Result<Bytes, Error>`
     pub fn add_stream<I: Into<String>>(
         &mut self,
         name: I,
@@ -189,6 +154,7 @@ where
         }
     }
 
+    /// Add a Field to the Multipart request
     pub fn add_field<I: Into<String>>(&mut self, name: I, value: I) {
         let field = MultipartField::new(name, value);
 
@@ -199,6 +165,9 @@ where
         }
     }
 
+    /// Gets the boundary for the MultipartRequest
+    ///
+    /// This is useful for supplying the `Content-Type` header
     pub fn get_boundary(&self) -> &str {
         &self.boundary
     }
@@ -212,6 +181,33 @@ where
         buf.extend_from_slice(b"--\r\n");
 
         buf.freeze()
+    }
+}
+
+#[cfg(feature = "filestream")]
+use crate::filestream::FileStream;
+
+#[cfg(feature = "filestream")]
+impl MultipartRequest<FileStream> {
+    /// Add a FileStream to a MultipartRequest given a path to a file
+    ///
+    /// This will guess the Content Type based upon the path (i.e, .jpg will be `image/jpeg`)
+    pub fn add_file<I: Into<String>, P: Into<PathBuf>>(&mut self, name: I, path: P) {
+        let buf = path.into();
+
+        let name = name.into();
+
+        let filename = buf
+            .file_name()
+            .expect("Should be a valid file")
+            .to_string_lossy()
+            .to_string();
+        let content_type = mime_guess::MimeGuess::from_path(&buf)
+            .first_or_octet_stream()
+            .to_string();
+        let stream = FileStream::new(buf);
+
+        self.add_stream(name, filename, content_type, stream);
     }
 }
 
@@ -338,6 +334,33 @@ where
         }
 
         return Poll::Ready(bytes.map(|bytes| Ok(bytes)));
+    }
+}
+
+/// A Simple In-Memory Stream that can be used to store bytes
+#[derive(Clone)]
+pub struct ByteStream {
+    bytes: Option<Bytes>,
+}
+
+impl ByteStream {
+    /// Create a new ByteStream based upon the byte slice (note: this will copy from the slice)
+    pub fn new(bytes: &[u8]) -> Self {
+        let mut buf = BytesMut::new();
+
+        buf.extend_from_slice(bytes);
+
+        ByteStream {
+            bytes: Some(buf.freeze()),
+        }
+    }
+}
+
+impl Stream for ByteStream {
+    type Item = Result<Bytes, Infallible>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.as_mut().bytes.take().map(|val| Ok(val)))
     }
 }
 

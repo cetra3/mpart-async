@@ -9,9 +9,19 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use thiserror::Error;
 
-use twoway::find_bytes;
+use twoway::{find_bytes, rfind_bytes};
 
 type AnyStdError = Box<dyn StdError + Send + Sync + 'static>;
+
+/// A single field of a [`MultipartStream`](./struct.MultipartStream.html) which itself is a stream
+///
+/// This represents either an uploaded file, or a simple text value
+///
+/// Each field will have some headers and then a body.
+/// There are no assumptions made when parsing about what headers are present, but some of the helper methods here (such as `content_type()` & `filename()`) will return an error if they aren't present.
+/// The body will be returned as an inner stream of bytes from the request, but up to the end of the field.
+///
+/// Fields are not concurrent against their parent multipart request. This is because multipart submissions are a single http request and we don't support going backwards or skipping bytes.  In other words you can't read from multiple fields from the same request at the same time: you must wait for one field to finish being read before moving on.
 
 pub struct MultipartField<S, E>
 where
@@ -27,10 +37,14 @@ where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<AnyStdError>,
 {
+    /// Return the headers for the field
+    ///
+    /// You can use `self.headers.get("my-header").and_then(|val| val.to_str().ok())` to get out the header if present
     pub fn headers(&self) -> &HeaderMap<HeaderValue> {
         &self.headers
     }
 
+    /// Return the content type of the field (if present or error)
     pub fn content_type<'a>(&'a self) -> Result<&'a str, MultipartError> {
         if let Some(val) = self.headers.get("content-type") {
             return val.to_str().map_err(|_| MultipartError::InvalidHeader);
@@ -39,6 +53,7 @@ where
         Err(MultipartError::InvalidHeader)
     }
 
+    /// Return the filename of the field (if present or error)
     pub fn filename<'a>(&'a self) -> Result<&'a str, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
             let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
@@ -50,6 +65,7 @@ where
         Err(MultipartError::InvalidHeader)
     }
 
+    /// Return the name of the field (if present or error)
     pub fn name<'a>(&'a self) -> Result<&'a str, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
             let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
@@ -124,6 +140,49 @@ where
     next_item: Option<HeaderMap<HeaderValue>>,
 }
 
+/// The main `MultipartStream` struct which will contain one or more fields (a stream of streams)
+///
+/// You can construct this given a boundary and a stream of bytes from a server request.
+///
+/// **Please Note**: If you are reading in a field, you must exhaust the field's bytes before moving onto the next field
+/// ```no_run
+/// # use warp::Filter;
+/// # use bytes::Buf;
+/// # use futures::stream::TryStreamExt;
+/// # use futures::Stream;
+/// # use mime::Mime;
+/// # use mpart_async::server::MultipartStream;
+/// # use std::convert::Infallible;
+/// # #[tokio::main]
+/// # async fn main() {
+/// #     // Match any request and return hello world!
+/// #     let routes = warp::any()
+/// #         .and(warp::header::<Mime>("content-type"))
+/// #         .and(warp::body::stream())
+/// #         .and_then(mpart);
+/// #     warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+/// # }
+/// # async fn mpart(
+/// #     mime: Mime,
+/// #     body: impl Stream<Item = Result<impl Buf, warp::Error>> + Unpin,
+/// # ) -> Result<impl warp::Reply, Infallible> {
+/// #     let boundary = mime.get_param("boundary").map(|v| v.to_string()).unwrap();
+/// let mut stream = MultipartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
+///
+/// while let Ok(Some(mut field)) = stream.try_next().await {
+///     println!("Field received:{}", field.name().unwrap());
+///     if let Ok(filename) = field.filename() {
+///         println!("Field filename:{}", filename);
+///     }
+///
+///     while let Ok(Some(bytes)) = field.try_next().await {
+///         println!("Bytes received:{}", bytes.len());
+///     }
+/// }
+/// #     Ok(format!("Thanks!\n"))
+/// # }
+/// ```
+
 pub struct MultipartStream<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -191,34 +250,55 @@ where
 }
 
 #[derive(Error, Debug)]
+/// The Standard Error Type
 pub enum MultipartError {
+    /// Given if the boundary is not what is expected
     #[error("Invalid Boundary. (expected {expected:?}, found {found:?})")]
-    InvalidBoundary { expected: String, found: String },
+    InvalidBoundary {
+        /// The Expected Boundary
+        expected: String,
+        /// The Found Boundary
+        found: String,
+    },
+    /// Given if when parsing the headers they are incomplete
     #[error("Incomplete Headers")]
     IncompleteHeader,
+    /// Given if when trying to retrieve a field like name or filename it's not present or malformed
     #[error("Invalid Header Value")]
     InvalidHeader,
+    /// Given if in the middle of polling a Field, and someone tries to poll the Stream
     #[error(
         "Tried to poll an MultipartStream when the MultipartField should be polled, try using `flatten()`"
     )]
     ShouldPollField,
+    /// Given if in the middle of polling a Field, but the Mutex is in use somewhere else
     #[error("Tried to poll an MultipartField and the Mutex has already been locked")]
     InternalBorrowError,
+    /// Given if there is an error when parsing headers
     #[error(transparent)]
     HeaderParse(#[from] httparse::Error),
+    /// Given if there is an error in the underlying stream
     #[error(transparent)]
     Stream(#[from] AnyStdError),
+    /// Given if the stream ends when reading headers
     #[error("EOF while reading headers")]
     EOFWhileReadingHeaders,
+    /// Given if the stream ends when reading boundary
     #[error("EOF while reading boundary")]
     EOFWhileReadingBoundary,
+    /// Given if if the stream ends when reading the body and there is no end boundary
     #[error("EOF while reading body")]
     EOFWhileReadingBody,
+    /// Given if there is garbage after the boundary
     #[error("Garbage following boundary: {0:02x?}")]
     GarbageAfterBoundary([u8; 2]),
 }
 
-//This parses the multipart and then streams out headers & bytes
+/// A low-level parser which `MultipartStream` uses.
+///
+/// Returns either headers of a field or a byte chunk, alternating between the two types
+///
+/// Unless there is an issue with using [`MultipartStream`](./struct.MultipartStream.html) you don't normally want to use this struct
 pub struct MultipartParser<S, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
@@ -235,6 +315,7 @@ where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
     E: Into<AnyStdError>,
 {
+    /// Construct a raw parser from a boundary/stream.
     pub fn new<I: Into<Bytes>>(boundary: I, stream: S) -> Self {
         Self {
             boundary: boundary.into(),
@@ -433,8 +514,21 @@ where
                                 )));
                             }
                         } else {
-                            let mut buffer = self_mut.buffer.split_off(idx + 1);
+                            let mut new_idx = idx + 1;
+
+                            //If there is an `\r\n` in the stream we'll fast forward to it.
+                            if let Some(rn_idx) = find_bytes(&self_mut.buffer[idx + 1..], b"\r\n") {
+                                new_idx = rn_idx + idx + 1;
+                            //Otherwise we can find the last `\r` and fast forward to that!
+                            } else if let Some(r_idx) =
+                                rfind_bytes(&self_mut.buffer[idx + 1..], b"\r")
+                            {
+                                new_idx = r_idx + idx + 1;
+                            }
+
+                            let mut buffer = self_mut.buffer.split_off(new_idx);
                             mem::swap(&mut self_mut.buffer, &mut buffer);
+                            cx.waker().wake_by_ref();
                             return Poll::Ready(Some(Ok(ParseOutput::Bytes(buffer.into()))));
                         }
                     } else {
@@ -458,8 +552,11 @@ enum State {
 }
 
 #[derive(Debug)]
+/// The output from a MultipartParser
 pub enum ParseOutput {
+    /// Headers received in the output
     Headers(HeaderMap<HeaderValue>),
+    /// Bytes received in the output
     Bytes(Bytes),
 }
 
@@ -700,5 +797,46 @@ mod tests {
         assert!(nth.is_none());
 
         assert_eq!(buffer.as_ref(), b"\r\n\r\ndolphin\nwhale");
+    }
+
+    #[test]
+    fn r_read() {
+        use bytes::{BufMut, BytesMut};
+
+        let input = b"----------------------------332056022174478975396798\r\n\
+                Content-Disposition: form-data; name=\"file\"\r\n\
+                Content-Type: application/octet-stream\r\n\
+                \r\n\
+                \r\r\r\r\r\r\r\r\r\r\r\r\r\
+                \r\n\
+                ----------------------------332056022174478975396798--\r\n";
+
+        let boundary = "--------------------------332056022174478975396798";
+
+        let mut read = MultipartStream::new(boundary, ByteStream::new(input));
+
+        let mut part = match block_on(read.next()).unwrap() {
+            Ok(mf) => {
+                assert_eq!(mf.name().unwrap(), "file");
+                assert_eq!(mf.content_type().unwrap(), "application/octet-stream");
+                mf
+            }
+            Err(e) => panic!("unexpected: {}", e),
+        };
+
+        let mut buffer = BytesMut::new();
+
+        loop {
+            match block_on(part.next()) {
+                Some(Ok(bytes)) => buffer.put(bytes),
+                Some(Err(e)) => panic!("unexpected {}", e),
+                None => break,
+            }
+        }
+
+        let nth = block_on(read.next());
+        assert!(nth.is_none());
+
+        assert_eq!(buffer.as_ref(), b"\r\r\r\r\r\r\r\r\r\r\r\r\r");
     }
 }
