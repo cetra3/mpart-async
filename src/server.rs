@@ -2,6 +2,7 @@ use bytes::{Bytes, BytesMut};
 use futures::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
+use pin_project::pin_project;
 use std::error::Error as StdError;
 use std::mem;
 use std::pin::Pin;
@@ -299,20 +300,22 @@ pub enum MultipartError {
 /// Returns either headers of a field or a byte chunk, alternating between the two types
 ///
 /// Unless there is an issue with using [`MultipartStream`](./struct.MultipartStream.html) you don't normally want to use this struct
+#[pin_project(project = ParserProj)]
 pub struct MultipartParser<S, E>
 where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    S: Stream<Item = Result<Bytes, E>>,
     E: Into<AnyStdError>,
 {
     boundary: Bytes,
     buffer: BytesMut,
     state: State,
+    #[pin]
     stream: S,
 }
 
 impl<S, E> MultipartParser<S, E>
 where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    S: Stream<Item = Result<Bytes, E>>,
     E: Into<AnyStdError>,
 {
     /// Construct a raw parser from a boundary/stream.
@@ -353,25 +356,29 @@ fn get_headers(buffer: &[u8]) -> Result<HeaderMap<HeaderValue>, MultipartError> 
 
 impl<S, E> Stream for MultipartParser<S, E>
 where
-    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    S: Stream<Item = Result<Bytes, E>>,
     E: Into<AnyStdError>,
 {
     type Item = Result<ParseOutput, MultipartError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        use futures::stream::StreamExt;
-        let self_mut = &mut self.as_mut();
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let ParserProj {
+            boundary,
+            buffer,
+            state,
+            mut stream,
+        } = self.project();
 
-        let boundary_len = self_mut.boundary.len();
+        let boundary_len = boundary.len();
 
         loop {
-            match self_mut.state {
+            match state {
                 State::ReadingBoundary => {
                     //If the buffer is too small
-                    if self_mut.buffer.len() < boundary_len + 4 {
-                        match futures::ready!(self_mut.stream.poll_next_unpin(cx)) {
-                            Some(Ok(buffer)) => {
-                                self_mut.buffer.extend_from_slice(&buffer);
+                    if buffer.len() < boundary_len + 4 {
+                        match futures::ready!(stream.as_mut().poll_next(cx)) {
+                            Some(Ok(bytes)) => {
+                                buffer.extend_from_slice(&bytes);
                                 continue;
                             }
                             Some(Err(e)) => {
@@ -386,20 +393,19 @@ where
                     }
 
                     //If the buffer starts with `--<boundary>\r\n`
-                    if &self_mut.buffer[..2] == b"--"
-                        && &self_mut.buffer[2..boundary_len + 2] == &self_mut.boundary
-                        && &self_mut.buffer[boundary_len + 2..boundary_len + 4] == b"\r\n"
+                    if &buffer[..2] == b"--"
+                        && &buffer[2..boundary_len + 2] == &*boundary
+                        && &buffer[boundary_len + 2..boundary_len + 4] == b"\r\n"
                     {
                         //remove the boundary from the buffer, returning the tail
-                        self_mut.buffer = self_mut.buffer.split_off(boundary_len + 4);
-                        self_mut.state = State::ReadingHeader;
+                        *buffer = buffer.split_off(boundary_len + 4);
+                        *state = State::ReadingHeader;
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     } else {
-                        let expected =
-                            format!("--{}\\r\\n", String::from_utf8_lossy(&self_mut.boundary));
-                        let found = String::from_utf8_lossy(&self_mut.buffer[..boundary_len + 4])
-                            .to_string();
+                        let expected = format!("--{}\\r\\n", String::from_utf8_lossy(&boundary));
+                        let found =
+                            String::from_utf8_lossy(&buffer[..boundary_len + 4]).to_string();
 
                         let error = MultipartError::InvalidBoundary { expected, found };
 
@@ -408,28 +414,28 @@ where
                     }
                 }
                 State::ReadingHeader => {
-                    if let Some(end) = find_bytes(&self_mut.buffer, b"\r\n\r\n") {
+                    if let Some(end) = find_bytes(&buffer, b"\r\n\r\n") {
                         //Need to include the end header bytes for the parse to work
                         let end = end + 4;
 
-                        let header_map = match get_headers(&self_mut.buffer[0..end]) {
+                        let header_map = match get_headers(&buffer[0..end]) {
                             Ok(headers) => headers,
                             Err(error) => {
-                                self_mut.state = State::Finished;
+                                *state = State::Finished;
                                 return Poll::Ready(Some(Err(error)));
                             }
                         };
 
-                        self_mut.buffer = self_mut.buffer.split_off(end);
+                        *buffer = buffer.split_off(end);
+                        *state = State::StreamingContent(buffer.is_empty());
 
-                        self_mut.state = State::StreamingContent(self_mut.buffer.is_empty());
                         cx.waker().wake_by_ref();
 
                         return Poll::Ready(Some(Ok(ParseOutput::Headers(header_map))));
                     } else {
-                        match futures::ready!(self_mut.stream.poll_next_unpin(cx)) {
-                            Some(Ok(buffer)) => {
-                                self_mut.buffer.extend_from_slice(&buffer);
+                        match futures::ready!(stream.as_mut().poll_next(cx)) {
+                            Some(Ok(bytes)) => {
+                                buffer.extend_from_slice(&bytes);
                                 continue;
                             }
                             Some(Err(e)) => {
@@ -445,11 +451,11 @@ where
                 }
 
                 State::StreamingContent(exhausted) => {
-                    if self_mut.buffer.is_empty() || exhausted {
-                        self_mut.state = State::StreamingContent(false);
-                        match futures::ready!(self_mut.stream.poll_next_unpin(cx)) {
-                            Some(Ok(buffer)) => {
-                                self_mut.buffer.extend_from_slice(&buffer);
+                    if buffer.is_empty() || *exhausted {
+                        *state = State::StreamingContent(false);
+                        match futures::ready!(stream.as_mut().poll_next(cx)) {
+                            Some(Ok(bytes)) => {
+                                buffer.extend_from_slice(&bytes);
                                 continue;
                             }
                             Some(Err(e)) => {
@@ -462,48 +468,46 @@ where
                     }
 
                     //We want to check the value of the buffer to see if there looks like there is an `end` boundary.
-                    if let Some(idx) = find_bytes(&self_mut.buffer, b"\r") {
+                    if let Some(idx) = find_bytes(&buffer, b"\r") {
                         //Check the length has enough bytes for us
-                        if self_mut.buffer.len() < idx + 6 + boundary_len {
+                        if buffer.len() < idx + 6 + boundary_len {
                             //If the inner stream is finished, we should finish here too
                             // FIXME: cannot stop the read successfully here!
-                            self_mut.state = State::StreamingContent(true);
+                            *state = State::StreamingContent(true);
                             continue;
                         }
 
                         //The start of the boundary is 4 chars. i.e, after `\r\n--`
                         let start_boundary = idx + 4;
 
-                        if &self_mut.buffer[idx..start_boundary] == b"\r\n--"
-                            && &self_mut.buffer[start_boundary..start_boundary + boundary_len]
-                                == self_mut.boundary
+                        if &buffer[idx..start_boundary] == b"\r\n--"
+                            && &buffer[start_boundary..start_boundary + boundary_len] == boundary
                         {
                             //We want the chars after the boundary basically
-                            let after_boundary = &self_mut.buffer
+                            let after_boundary = &buffer
                                 [start_boundary + boundary_len..start_boundary + boundary_len + 2];
 
                             if after_boundary == b"\r\n" {
-                                let mut other_bytes = self_mut.buffer.split_off(idx);
+                                let mut other_bytes = (*buffer).split_off(idx);
 
                                 //Remove the boundary-related bytes from the start of the buffer
                                 other_bytes = other_bytes.split_off(6 + boundary_len);
 
                                 //Return the bytes up to the boundary, we're finished and need to go back to reading headers
-                                let return_bytes =
-                                    Bytes::from(mem::replace(&mut self_mut.buffer, other_bytes));
+                                let return_bytes = Bytes::from(mem::replace(buffer, other_bytes));
 
                                 //Replace the buffer with the extra bytes
-                                self_mut.state = State::ReadingHeader;
+                                *state = State::ReadingHeader;
                                 cx.waker().wake_by_ref();
 
                                 return Poll::Ready(Some(Ok(ParseOutput::Bytes(return_bytes))));
                             } else if after_boundary == b"--" {
                                 //We're at the end, just truncate the bytes
-                                self_mut.buffer.truncate(idx);
-                                self_mut.state = State::Finished;
+                                buffer.truncate(idx);
+                                *state = State::Finished;
 
                                 return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(
-                                    mem::take(&mut self_mut.buffer),
+                                    mem::take(buffer),
                                 )))));
                             } else {
                                 return Poll::Ready(Some(Err(
@@ -517,23 +521,21 @@ where
                             let mut new_idx = idx + 1;
 
                             //If there is an `\r\n` in the stream we'll fast forward to it.
-                            if let Some(rn_idx) = find_bytes(&self_mut.buffer[idx + 1..], b"\r\n") {
+                            if let Some(rn_idx) = find_bytes(&buffer[idx + 1..], b"\r\n") {
                                 new_idx = rn_idx + idx + 1;
                             //Otherwise we can find the last `\r` and fast forward to that!
-                            } else if let Some(r_idx) =
-                                rfind_bytes(&self_mut.buffer[idx + 1..], b"\r")
-                            {
+                            } else if let Some(r_idx) = rfind_bytes(&buffer[idx + 1..], b"\r") {
                                 new_idx = r_idx + idx + 1;
                             }
 
-                            let mut buffer = self_mut.buffer.split_off(new_idx);
-                            mem::swap(&mut self_mut.buffer, &mut buffer);
+                            let mut new_buffer = buffer.split_off(new_idx);
+                            mem::swap(buffer, &mut new_buffer);
                             cx.waker().wake_by_ref();
-                            return Poll::Ready(Some(Ok(ParseOutput::Bytes(buffer.into()))));
+                            return Poll::Ready(Some(Ok(ParseOutput::Bytes(new_buffer.into()))));
                         }
                     } else {
                         //If we didn't find an `\r` in any of the multiparts, just take out the buffer and return as bytes
-                        let buffer = mem::take(&mut self_mut.buffer);
+                        let buffer = mem::take(buffer);
                         return Poll::Ready(Some(Ok(ParseOutput::Bytes(Bytes::from(buffer)))));
                     }
                 }

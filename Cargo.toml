@@ -20,6 +20,7 @@ tokio = {version = "0.2.10", optional = true, features= ["fs", "rt-threaded", "m
 tokio-util = {version = "0.2", optional = true, features= ["codec"]}
 mime_guess = {version = "2.0.1", optional = true}
 thiserror = "1.0"
+pin-project = "0.4.22"
 
 [dev-dependencies]
 hyper = "0.13"
