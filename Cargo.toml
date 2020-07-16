@@ -28,6 +28,7 @@ warp = "0.2.2"
 mime = "0.3.16"
 headers = "0.3.2"
 criterion = "0.3"
+rand = "0.7"
 
 [features]
 default = [
