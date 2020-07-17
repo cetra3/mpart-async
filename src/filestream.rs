@@ -1,4 +1,4 @@
-use futures::Stream;
+use futures_core::Stream;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio_util::codec::{BytesCodec, FramedRead};

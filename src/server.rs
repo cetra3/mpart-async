@@ -1,5 +1,5 @@
 use bytes::{Bytes, BytesMut};
-use futures::Stream;
+use futures_core::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
 use pin_project::pin_project;
@@ -149,8 +149,8 @@ where
 /// ```no_run
 /// # use warp::Filter;
 /// # use bytes::Buf;
-/// # use futures::stream::TryStreamExt;
-/// # use futures::Stream;
+/// # use futures_util::TryStreamExt;
+/// # use futures_core::Stream;
 /// # use mime::Mime;
 /// # use mpart_async::server::MultipartStream;
 /// # use std::convert::Infallible;
@@ -376,7 +376,7 @@ where
 
                     //If the buffer is too small
                     if buffer.len() < boundary_len + 4 {
-                        match futures::ready!(stream.as_mut().poll_next(cx)) {
+                        match futures_core::ready!(stream.as_mut().poll_next(cx)) {
                             Some(Ok(bytes)) => {
                                 buffer.extend_from_slice(&bytes);
                                 continue;
@@ -442,7 +442,7 @@ where
 
                         return Poll::Ready(Some(Ok(ParseOutput::Headers(header_map))));
                     } else {
-                        match futures::ready!(stream.as_mut().poll_next(cx)) {
+                        match futures_core::ready!(stream.as_mut().poll_next(cx)) {
                             Some(Ok(bytes)) => {
                                 buffer.extend_from_slice(&bytes);
                                 continue;
@@ -464,7 +464,7 @@ where
 
                     if buffer.is_empty() || *exhausted {
                         *state = State::StreamingContent(false);
-                        match futures::ready!(stream.as_mut().poll_next(cx)) {
+                        match futures_core::ready!(stream.as_mut().poll_next(cx)) {
                             Some(Ok(bytes)) => {
                                 buffer.extend_from_slice(&bytes);
                                 continue;
@@ -576,11 +576,10 @@ pub enum ParseOutput {
 mod tests {
     use super::*;
     use crate::client::ByteStream;
-    use futures::executor::block_on;
-    use futures::StreamExt;
+    use futures_util::StreamExt;
 
-    #[test]
-    fn read_stream() {
+    #[tokio::test]
+    async fn read_stream() {
         let input: &[u8] = b"--AaB03x\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
                 Content-Type: text/plain\r\n\
@@ -598,11 +597,11 @@ mod tests {
 
         let mut stream = MultipartStream::new("AaB03x", ByteStream::new(input));
 
-        if let Some(Ok(mut mpart_field)) = block_on(stream.next()) {
+        if let Some(Ok(mut mpart_field)) = stream.next().await {
             assert_eq!(mpart_field.name().ok(), Some("file"));
             assert_eq!(mpart_field.filename().ok(), Some("text.txt"));
 
-            if let Some(Ok(bytes)) = block_on(mpart_field.next()) {
+            if let Some(Ok(bytes)) = mpart_field.next().await {
                 assert_eq!(bytes, Bytes::from(b"Lorem Ipsum\n" as &[u8]));
             }
         } else {
@@ -620,8 +619,8 @@ mod tests {
         assert_eq!(filename, Some("text.txt"));
     }
 
-    #[test]
-    fn reads_streams_and_fields() {
+    #[tokio::test]
+    async fn reads_streams_and_fields() {
         let input: &[u8] = b"--AaB03x\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
                 Content-Type: text/plain\r\n\
@@ -639,61 +638,62 @@ mod tests {
 
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        if let Some(Ok(ParseOutput::Headers(val))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Headers(val))) = read.next().await {
             println!("Headers:{:?}", val);
         } else {
             panic!("First value should be a header")
         }
 
-        if let Some(Ok(ParseOutput::Bytes(bytes))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Bytes(bytes))) = read.next().await {
             assert_eq!(&*bytes, b"Lorem Ipsum\n");
         } else {
             panic!("Second value should be bytes")
         }
 
-        if let Some(Ok(ParseOutput::Headers(val))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Headers(val))) = read.next().await {
             println!("Headers:{:?}", val);
         } else {
             panic!("Third value should be a header")
         }
 
-        if let Some(Ok(ParseOutput::Bytes(bytes))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Bytes(bytes))) = read.next().await {
             assert_eq!(&*bytes, b"value1");
         } else {
             panic!("Fourth value should be bytes")
         }
 
-        if let Some(Ok(ParseOutput::Headers(val))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Headers(val))) = read.next().await {
             println!("Headers:{:?}", val);
         } else {
             panic!("Fifth value should be a header")
         }
 
-        if let Some(Ok(ParseOutput::Bytes(bytes))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Bytes(bytes))) = read.next().await {
             assert_eq!(&*bytes, b"value2");
         } else {
             panic!("Sixth value should be bytes")
         }
 
-        assert!(block_on(read.next()).is_none());
+        assert!(read.next().await.is_none());
     }
 
-    #[test]
-    fn unfinished_header() {
+    #[tokio::test]
+    async fn unfinished_header() {
         let input: &[u8] = b"--AaB03x\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
                 Content-Type: text/plain";
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        let ret = block_on(read.next());
+        let ret = read.next().await;
 
         assert!(matches!(
             ret,
             Some(Err(MultipartError::EOFWhileReadingHeaders))
         ),);
     }
-    #[test]
-    fn unfinished_second_header() {
+
+    #[tokio::test]
+    async fn unfinished_second_header() {
         let input: &[u8] = b"--AaB03x\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
                 Content-Type: text/plain\r\n\
@@ -704,34 +704,35 @@ mod tests {
 
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        if let Some(Ok(ParseOutput::Headers(val))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Headers(val))) = read.next().await {
             println!("Headers:{:?}", val);
         } else {
             panic!("First value should be a header")
         }
 
-        if let Some(Ok(ParseOutput::Bytes(bytes))) = block_on(read.next()) {
+        if let Some(Ok(ParseOutput::Bytes(bytes))) = read.next().await {
             assert_eq!(&*bytes, b"Lorem Ipsum\n");
         } else {
             panic!("Second value should be bytes")
         }
 
-        let ret = block_on(read.next());
+        let ret = read.next().await;
 
         assert!(matches!(
             ret,
             Some(Err(MultipartError::EOFWhileReadingHeaders))
         ),);
     }
-    #[test]
-    fn invalid_header() {
+
+    #[tokio::test]
+    async fn invalid_header() {
         let input: &[u8] = b"--AaB03x\r\n\
                 I am a bad header\r\n\
                 \r\n";
 
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        let val = block_on(read.next()).unwrap();
+        let val = read.next().await.unwrap();
 
         match val {
             Err(MultipartError::HeaderParse(err)) => {
@@ -744,8 +745,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn invalid_boundary() {
+    #[tokio::test]
+    async fn invalid_boundary() {
         let input: &[u8] = b"--InvalidBoundary\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
                 Content-Type: text/plain\r\n\
@@ -755,7 +756,7 @@ mod tests {
 
         let mut read = MultipartParser::new("AaB03x", ByteStream::new(input));
 
-        let val = block_on(read.next()).unwrap();
+        let val = read.next().await.unwrap();
 
         match val {
             Err(MultipartError::InvalidBoundary { expected, found }) => {
@@ -768,8 +769,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn zero_read() {
+    #[tokio::test]
+    async fn zero_read() {
         use bytes::{BufMut, BytesMut};
 
         let input = b"----------------------------332056022174478975396798\r\n\
@@ -786,7 +787,7 @@ mod tests {
 
         let mut read = MultipartStream::new(boundary, ByteStream::new(input));
 
-        let mut part = match block_on(read.next()).unwrap() {
+        let mut part = match read.next().await.unwrap() {
             Ok(mf) => {
                 assert_eq!(mf.name().unwrap(), "file");
                 assert_eq!(mf.content_type().unwrap(), "application/octet-stream");
@@ -798,21 +799,21 @@ mod tests {
         let mut buffer = BytesMut::new();
 
         loop {
-            match block_on(part.next()) {
+            match part.next().await {
                 Some(Ok(bytes)) => buffer.put(bytes),
                 Some(Err(e)) => panic!("unexpected {}", e),
                 None => break,
             }
         }
 
-        let nth = block_on(read.next());
+        let nth = read.next().await;
         assert!(nth.is_none());
 
         assert_eq!(buffer.as_ref(), b"\r\n\r\ndolphin\nwhale");
     }
 
-    #[test]
-    fn r_read() {
+    #[tokio::test]
+    async fn r_read() {
         use std::convert::Infallible;
 
         //Used to ensure partial matches are working!
@@ -870,7 +871,7 @@ mod tests {
 
         let mut read = MultipartStream::new(boundary, split_stream);
 
-        let mut part = match block_on(read.next()).unwrap() {
+        let mut part = match read.next().await.unwrap() {
             Ok(mf) => {
                 assert_eq!(mf.name().unwrap(), "file");
                 assert_eq!(mf.content_type().unwrap(), "application/octet-stream");
@@ -882,14 +883,14 @@ mod tests {
         let mut buffer = BytesMut::new();
 
         loop {
-            match block_on(part.next()) {
+            match part.next().await {
                 Some(Ok(bytes)) => buffer.put(bytes),
                 Some(Err(e)) => panic!("unexpected {}", e),
                 None => break,
             }
         }
 
-        let nth = block_on(read.next());
+        let nth = read.next().await;
         assert!(nth.is_none());
 
         assert_eq!(buffer.as_ref(), b"\r\r\r\r\r\r\r\r\r\r\r\r\r");

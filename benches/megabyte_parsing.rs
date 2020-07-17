@@ -1,8 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use futures::executor::block_on;
-use futures::future;
-use futures::stream::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use mpart_async::client::{ByteStream, MultipartRequest};
 use mpart_async::server::MultipartStream;
 use rand::{thread_rng, RngCore};
@@ -106,6 +105,7 @@ fn ten_megabytes_random(c: &mut Criterion) {
 }
 
 fn bytes_and_boundary(input: &[u8]) -> (Bytes, Bytes) {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
     let mut request = MultipartRequest::default();
 
     let byte_stream = ByteStream::new(input);
@@ -114,26 +114,28 @@ fn bytes_and_boundary(input: &[u8]) -> (Bytes, Bytes) {
 
     let boundary = Bytes::from(request.get_boundary().to_string());
 
-    let bytes = block_on(request.fold(BytesMut::new(), |mut buf, result| {
-        if let Ok(bytes) = result {
-            buf.extend_from_slice(&bytes);
-        };
+    let bytes = rt
+        .block_on(request.fold(BytesMut::new(), |mut buf, result| async {
+            if let Ok(bytes) = result {
+                buf.extend_from_slice(&bytes);
+            };
 
-        future::ready(buf)
-    }))
-    .freeze();
+            buf
+        }))
+        .freeze();
 
     (bytes, boundary)
 }
 
 fn count_single_field_bytes(boundary: Bytes, bytes: Bytes, chunk_size: usize) -> usize {
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
     let stream = ChunkedStream(bytes, chunk_size);
     let mut stream = MultipartStream::new(boundary, stream);
 
-    let mut field = block_on(stream.next()).unwrap().unwrap();
+    let mut field = rt.block_on(stream.next()).unwrap().unwrap();
     let mut bytes = 0;
     loop {
-        match block_on(field.next()) {
+        match rt.block_on(field.next()) {
             Some(Ok(read)) => bytes += read.len(),
             Some(Err(e)) => panic!("failed: {}", e),
             None => {
@@ -142,7 +144,7 @@ fn count_single_field_bytes(boundary: Bytes, bytes: Bytes, chunk_size: usize) ->
         }
     }
 
-    assert!(matches!(block_on(stream.next()), None));
+    assert!(matches!(rt.block_on(stream.next()), None));
     bytes
 }
 

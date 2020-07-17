@@ -1,8 +1,8 @@
 use warp::Filter;
 
 use bytes::Buf;
-use futures::stream::TryStreamExt;
-use futures::Stream;
+use futures_core::Stream;
+use futures_util::TryStreamExt;
 use mime::Mime;
 use mpart_async::server::MultipartStream;
 use std::convert::Infallible;
