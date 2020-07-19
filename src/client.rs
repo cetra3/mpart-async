@@ -1,9 +1,8 @@
 use bytes::{Bytes, BytesMut};
-use futures::Stream;
+use futures_core::Stream;
 use log::debug;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -186,6 +185,8 @@ where
 
 #[cfg(feature = "filestream")]
 use crate::filestream::FileStream;
+#[cfg(feature = "filestream")]
+use std::path::PathBuf;
 
 #[cfg(feature = "filestream")]
 impl MultipartRequest<FileStream> {
@@ -367,8 +368,7 @@ impl Stream for ByteStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::executor::block_on;
-    use futures::{future, StreamExt};
+    use futures_util::StreamExt;
 
     #[test]
     fn sets_boundary() {
@@ -404,8 +404,8 @@ mod tests {
         assert_eq!(&bytes[..], input);
     }
 
-    #[test]
-    fn writes_fields() {
+    #[tokio::test]
+    async fn writes_fields() {
         let mut req: MultipartRequest<ByteStream> = MultipartRequest::new("AaB03x");
 
         req.add_field("name1", "value1");
@@ -421,19 +421,21 @@ mod tests {
                 value2\r\n\
                 --AaB03x--\r\n";
 
-        let output = block_on(req.fold(BytesMut::new(), |mut buf, result| {
-            if let Ok(bytes) = result {
-                buf.extend_from_slice(&bytes);
-            };
+        let output = req
+            .fold(BytesMut::new(), |mut buf, result| async {
+                if let Ok(bytes) = result {
+                    buf.extend_from_slice(&bytes);
+                };
 
-            future::ready(buf)
-        }));
+                buf
+            })
+            .await;
 
         assert_eq!(&output[..], input);
     }
 
-    #[test]
-    fn writes_streams() {
+    #[tokio::test]
+    async fn writes_streams() {
         let mut req: MultipartRequest<ByteStream> = MultipartRequest::new("AaB03x");
 
         let stream = ByteStream::new(b"Lorem Ipsum\n");
@@ -447,19 +449,21 @@ mod tests {
                 Lorem Ipsum\n\r\n\
                 --AaB03x--\r\n";
 
-        let output = block_on(req.fold(BytesMut::new(), |mut buf, result| {
-            if let Ok(bytes) = result {
-                buf.extend_from_slice(&bytes);
-            };
+        let output = req
+            .fold(BytesMut::new(), |mut buf, result| async {
+                if let Ok(bytes) = result {
+                    buf.extend_from_slice(&bytes);
+                };
 
-            future::ready(buf)
-        }));
+                buf
+            })
+            .await;
 
         assert_eq!(&output[..], input);
     }
 
-    #[test]
-    fn writes_streams_and_fields() {
+    #[tokio::test]
+    async fn writes_streams_and_fields() {
         let mut req: MultipartRequest<ByteStream> = MultipartRequest::new("AaB03x");
 
         let stream = ByteStream::new(b"Lorem Ipsum\n");
@@ -483,13 +487,15 @@ mod tests {
                 value2\r\n\
                 --AaB03x--\r\n";
 
-        let output = block_on(req.fold(BytesMut::new(), |mut buf, result| {
-            if let Ok(bytes) = result {
-                buf.extend_from_slice(&bytes);
-            };
+        let output = req
+            .fold(BytesMut::new(), |mut buf, result| async {
+                if let Ok(bytes) = result {
+                    buf.extend_from_slice(&bytes);
+                };
 
-            future::ready(buf)
-        }));
+                buf
+            })
+            .await;
 
         assert_eq!(&output[..], input);
     }
