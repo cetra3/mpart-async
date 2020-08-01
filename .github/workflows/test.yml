@@ -19,6 +19,9 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
       - name: Build
         uses: actions-rs/cargo@v1
         with:
