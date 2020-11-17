@@ -2,14 +2,14 @@ use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use log::debug;
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use std::convert::Infallible;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::{collections::VecDeque, convert::Infallible};
 
 /// The main `MultipartRequest` struct for sending Multipart submissions to servers
 pub struct MultipartRequest<S> {
     boundary: String,
-    items: Vec<MultipartItems<S>>,
+    items: VecDeque<MultipartItems<S>>,
     state: Option<State<S>>,
     written: usize,
 }
@@ -114,7 +114,7 @@ where
     ///
     /// If you want a boundary generated automatically, then you can use `MultipartRequest::default()`
     pub fn new<I: Into<String>>(boundary: I) -> Self {
-        let items = Vec::new();
+        let items = VecDeque::new();
 
         let state = None;
 
@@ -127,7 +127,7 @@ where
     }
 
     fn next_item(&mut self) -> State<S> {
-        match self.items.pop() {
+        match self.items.pop_front() {
             Some(MultipartItems::Field(new_field)) => State::WritingField(new_field),
             Some(MultipartItems::Stream(new_stream)) => State::WritingStreamHeader(new_stream),
             None => State::WritingFinished,
@@ -147,7 +147,7 @@ where
         let stream = MultipartStream::new(name, filename, content_type, stream);
 
         if self.state.is_some() {
-            self.items.push(MultipartItems::Stream(stream));
+            self.items.push_back(MultipartItems::Stream(stream));
         } else {
             self.state = Some(State::WritingStreamHeader(stream));
         }
@@ -158,7 +158,7 @@ where
         let field = MultipartField::new(name, value);
 
         if self.state.is_some() {
-            self.items.push(MultipartItems::Field(field));
+            self.items.push_back(MultipartItems::Field(field));
         } else {
             self.state = Some(State::WritingField(field));
         }
@@ -224,7 +224,7 @@ where
             .take(60)
             .collect();
 
-        let items = Vec::new();
+        let items = VecDeque::new();
 
         let state = None;
 
@@ -469,8 +469,8 @@ mod tests {
         let stream = ByteStream::new(b"Lorem Ipsum\n");
 
         req.add_stream("file", "text.txt", "text/plain", stream);
-        req.add_field("name2", "value2");
         req.add_field("name1", "value1");
+        req.add_field("name2", "value2");
 
         let input: &[u8] = b"--AaB03x\r\n\
                 Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"\r\n\
