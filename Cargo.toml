@@ -25,12 +25,13 @@ pin-project = "0.4.22"
 
 [dev-dependencies]
 hyper = "0.14"
-warp = { git = "https://github.com/seanmonstar/warp.git" }
+warp = { git = "https://github.com/aknuds1/warp", branch = "chore/upgrade-tokio" }
 mime = "0.3.16"
 headers = "0.3.2"
 criterion = "0.3"
 rand = "0.7"
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+tokio-stream = { version = "0.1" }
 
 [features]
 default = [

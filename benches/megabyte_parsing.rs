@@ -105,7 +105,7 @@ fn ten_megabytes_random(c: &mut Criterion) {
 }
 
 fn bytes_and_boundary(input: &[u8]) -> (Bytes, Bytes) {
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let mut request = MultipartRequest::default();
 
     let byte_stream = ByteStream::new(input);
@@ -128,7 +128,7 @@ fn bytes_and_boundary(input: &[u8]) -> (Bytes, Bytes) {
 }
 
 fn count_single_field_bytes(boundary: Bytes, bytes: Bytes, chunk_size: usize) -> usize {
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
     let stream = ChunkedStream(bytes, chunk_size);
     let mut stream = MultipartStream::new(boundary, stream);
 

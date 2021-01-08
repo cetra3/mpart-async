@@ -65,15 +65,14 @@ impl Stream for FileStream {
 #[cfg(test)]
 mod tests {
     use super::FileStream;
-    use bytes::Bytes;
     use std::io::Error;
-    use tokio::stream::StreamExt;
+    use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn streams_file() -> Result<(), Error> {
         let bytes = FileStream::new("Cargo.toml")
-            .collect::<Result<Bytes, Error>>()
-            .await?;
+            .next()
+            .await.unwrap()?;
 
         assert_eq!(bytes, &include_bytes!("../Cargo.toml")[..]);
 

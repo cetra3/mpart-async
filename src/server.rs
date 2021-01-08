@@ -148,7 +148,7 @@ where
 /// **Please Note**: If you are reading in a field, you must exhaust the field's bytes before moving onto the next field
 /// ```no_run
 /// # use warp::Filter;
-/// # use bytes::Buf;
+/// # use bytes::{Buf, BufMut, BytesMut};
 /// # use futures_util::TryStreamExt;
 /// # use futures_core::Stream;
 /// # use mime::Mime;
@@ -168,7 +168,11 @@ where
 /// #     body: impl Stream<Item = Result<impl Buf, warp::Error>> + Unpin,
 /// # ) -> Result<impl warp::Reply, Infallible> {
 /// #     let boundary = mime.get_param("boundary").map(|v| v.to_string()).unwrap();
-/// let mut stream = MultipartStream::new(boundary, body.map_ok(|mut buf| buf.to_bytes()));
+/// let mut stream = MultipartStream::new(boundary, body.map_ok(|mut buf| {
+///     let mut ret = BytesMut::with_capacity(buf.remaining());
+///     ret.put(buf);
+///     ret.freeze()
+/// }));
 ///
 /// while let Ok(Some(mut field)) = stream.try_next().await {
 ///     println!("Field received:{}", field.name().unwrap());
