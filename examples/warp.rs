@@ -1,6 +1,6 @@
 use warp::Filter;
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::Buf;
 use futures_core::Stream;
 use futures_util::TryStreamExt;
 use mime::Mime;
@@ -24,11 +24,10 @@ async fn mpart(
 ) -> Result<impl warp::Reply, Infallible> {
     let boundary = mime.get_param("boundary").map(|v| v.to_string()).unwrap();
 
-    let mut stream = MultipartStream::new(boundary, body.map_ok(|buf| {
-        let mut ret = BytesMut::with_capacity(buf.remaining());
-        ret.put(buf);
-        ret.freeze()
-    }));
+    let mut stream = MultipartStream::new(
+        boundary,
+        body.map_ok(|mut buf| buf.copy_to_bytes(buf.remaining())),
+    );
 
     while let Ok(Some(mut field)) = stream.try_next().await {
         println!("Field received:{}", field.name().unwrap());
