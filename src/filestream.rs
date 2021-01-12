@@ -70,9 +70,7 @@ mod tests {
 
     #[tokio::test]
     async fn streams_file() -> Result<(), Error> {
-        let bytes = FileStream::new("Cargo.toml")
-            .next()
-            .await.unwrap()?;
+        let bytes = FileStream::new("Cargo.toml").next().await.unwrap()?;
 
         assert_eq!(bytes, &include_bytes!("../Cargo.toml")[..]);
 
