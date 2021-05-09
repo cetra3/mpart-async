@@ -2,6 +2,7 @@ use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
+use percent_encoding::percent_decode_str;
 use pin_project::pin_project;
 use std::error::Error as StdError;
 use std::mem;
@@ -55,9 +56,10 @@ where
     }
 
     /// Return the filename of the field (if present or error)
-    pub fn filename<'a>(&'a self) -> Result<&'a str, MultipartError> {
+    pub fn filename(&self) -> Result<String, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
-            let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
+            let string_val =
+                std::str::from_utf8(val.as_bytes()).map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "filename") {
                 return Ok(filename);
             }
@@ -67,9 +69,10 @@ where
     }
 
     /// Return the name of the field (if present or error)
-    pub fn name<'a>(&'a self) -> Result<&'a str, MultipartError> {
+    pub fn name(&self) -> Result<String, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
-            let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
+            let string_val =
+                std::str::from_utf8(val.as_bytes()).map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "name") {
                 return Ok(filename);
             }
@@ -79,7 +82,7 @@ where
     }
 }
 
-fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<&'a str> {
+fn get_dispo_param(input: &str, param: &str) -> Option<String> {
     if let Some(start_idx) = input.find(&param) {
         let end_param = start_idx + param.len();
         //check bounds
@@ -87,9 +90,36 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<&'a str> {
             if &input[end_param..end_param + 2] == "=\"" {
                 let start = end_param + 2;
 
-                if let Some(end) = &input[start..].find("\"") {
-                    return Some(&input[start..start + end]);
+                // Scan for next " and unescape any \"
+                // It is intentional that only \" is uescaped as that is how firefox uses \
+                let mut value = String::new();
+                let mut it = input[start..].chars();
+                while let Some(ch) = it.next() {
+                    match ch {
+                        '\\' => {
+                            if let Some(next) = it.next() {
+                                if next == '"' {
+                                    value.push('"');
+                                } else {
+                                    value.push('\\');
+                                    value.push(next);
+                                }
+                            }
+                        }
+                        '\"' => {
+                            break;
+                        }
+                        _ => {
+                            value.push(ch);
+                        }
+                    }
                 }
+
+                // Decode any percent encoded characters in the string.
+                value = percent_decode_str(value.as_str())
+                    .decode_utf8_lossy()
+                    .into_owned();
+                return Some(value);
             }
         }
     }
@@ -602,8 +632,8 @@ mod tests {
         let mut stream = MultipartStream::new("AaB03x", ByteStream::new(input));
 
         if let Some(Ok(mut mpart_field)) = stream.next().await {
-            assert_eq!(mpart_field.name().ok(), Some("file"));
-            assert_eq!(mpart_field.filename().ok(), Some("text.txt"));
+            assert_eq!(mpart_field.name().ok(), Some("file".to_owned()));
+            assert_eq!(mpart_field.filename().ok(), Some("text.txt".to_owned()));
 
             if let Some(Ok(bytes)) = mpart_field.next().await {
                 assert_eq!(bytes, Bytes::from(b"Lorem Ipsum\n" as &[u8]));
@@ -619,8 +649,8 @@ mod tests {
         let name = get_dispo_param(input, "name");
         let filename = get_dispo_param(input, "filename");
 
-        assert_eq!(name, Some("file"));
-        assert_eq!(filename, Some("text.txt"));
+        assert_eq!(name, Some("file".to_owned()));
+        assert_eq!(filename, Some("text.txt".to_owned()));
     }
 
     #[tokio::test]
