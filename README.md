@@ -87,7 +87,7 @@ async fn mpart(
 
     let mut stream = MultipartStream::new(
         boundary,
-        body.map_ok(|buf| buf.copy_to_bytes(buf.remaining())),
+        body.map_ok(|mut buf| buf.copy_to_bytes(buf.remaining())),
     );
 
     while let Ok(Some(mut field)) = stream.try_next().await {
