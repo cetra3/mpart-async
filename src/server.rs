@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
-use pin_project::pin_project;
+use pin_project_lite::pin_project;
 use std::error::Error as StdError;
 use std::mem;
 use std::pin::Pin;
@@ -299,22 +299,24 @@ pub enum MultipartError {
     GarbageAfterBoundary([u8; 2]),
 }
 
-/// A low-level parser which `MultipartStream` uses.
-///
-/// Returns either headers of a field or a byte chunk, alternating between the two types
-///
-/// Unless there is an issue with using [`MultipartStream`](./struct.MultipartStream.html) you don't normally want to use this struct
-#[pin_project(project = ParserProj)]
-pub struct MultipartParser<S, E>
-where
-    S: Stream<Item = Result<Bytes, E>>,
-    E: Into<AnyStdError>,
-{
-    boundary: Bytes,
-    buffer: BytesMut,
-    state: State,
-    #[pin]
-    stream: S,
+pin_project! {
+    /// A low-level parser which `MultipartStream` uses.
+    ///
+    /// Returns either headers of a field or a byte chunk, alternating between the two types
+    ///
+    /// Unless there is an issue with using [`MultipartStream`](./struct.MultipartStream.html) you don't normally want to use this struct
+    #[project = ParserProj]
+    pub struct MultipartParser<S, E>
+    where
+        S: Stream<Item = Result<Bytes, E>>,
+        E: Into<AnyStdError>,
+    {
+        boundary: Bytes,
+        buffer: BytesMut,
+        state: State,
+        #[pin]
+        stream: S,
+    }
 }
 
 impl<S, E> MultipartParser<S, E>
