@@ -219,9 +219,10 @@ where
     fn default() -> Self {
         let mut rng = thread_rng();
 
-        let boundary: String = std::iter::repeat(())
-            .map(|()| rng.sample(Alphanumeric))
+        let boundary: String = (&mut rng)
+            .sample_iter(Alphanumeric)
             .take(60)
+            .map(char::from)
             .collect();
 
         let items = VecDeque::new();

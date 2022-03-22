@@ -7,6 +7,7 @@ use mpart_async::server::MultipartStream;
 use rand::{thread_rng, RngCore};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 fn ten_megabytes_zero_byte(c: &mut Criterion) {
     let total_size = 1024 * 1024 * 10;
@@ -166,9 +167,8 @@ impl Stream for ChunkedStream {
 }
 
 criterion_group!(
-    benches,
-    ten_megabytes_zero_byte,
-    ten_megabytes_r_byte,
-    ten_megabytes_random
+    name = benches;
+    config = Criterion::default().measurement_time(Duration::from_secs(10));
+    targets = ten_megabytes_zero_byte, ten_megabytes_r_byte, ten_megabytes_random
 );
 criterion_main!(benches);

@@ -8,7 +8,7 @@ With clients, you want to create a `MultipartRequest` & add in your fields & fil
 
 ### Hyper Client Example
 
-Here is an [example](examples/hyper.rs) of how to use the client with hyper (`cargo run --example warp`):
+Here is an [example](examples/hyper.rs) of how to use the client with hyper (`cargo run --example hyper`):
 
 ```rust
 use hyper::{header::CONTENT_TYPE, Body, Client, Request};

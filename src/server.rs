@@ -3,6 +3,7 @@ use futures_core::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
 use pin_project_lite::pin_project;
+use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::mem;
 use std::pin::Pin;
@@ -10,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use thiserror::Error;
 
-use twoway::{find_bytes, rfind_bytes};
+use memchr::{memchr, memmem::find, memrchr};
+use percent_encoding::percent_decode_str;
 
 type AnyStdError = Box<dyn StdError + Send + Sync + 'static>;
 
@@ -54,8 +56,9 @@ where
         Err(MultipartError::InvalidHeader)
     }
 
-    /// Return the filename of the field (if present or error)
-    pub fn filename<'a>(&'a self) -> Result<&'a str, MultipartError> {
+    /// Return the filename of the field (if present or error).
+    /// The returned filename will be utf8 percent-decoded
+    pub fn filename<'a>(&'a self) -> Result<Cow<'a, str>, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
             let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "filename") {
@@ -66,8 +69,9 @@ where
         Err(MultipartError::InvalidHeader)
     }
 
-    /// Return the name of the field (if present or error)
-    pub fn name<'a>(&'a self) -> Result<&'a str, MultipartError> {
+    /// Return the name of the field (if present or error).
+    /// The returned name will be utf8 percent-decoded
+    pub fn name<'a>(&'a self) -> Result<Cow<'a, str>, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
             let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "name") {
@@ -78,17 +82,76 @@ where
         Err(MultipartError::InvalidHeader)
     }
 }
-
-fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<&'a str> {
-    if let Some(start_idx) = input.find(&param) {
+// This function will get a disposition param from `content-disposition` header & try to escape it if there are escaped quotes or percent encoding
+fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<Cow<'a, str>> {
+    println!("dispo param:{input}, field `{param}`");
+    if let Some(start_idx) = find(input.as_bytes(), param.as_bytes()) {
+        eprintln!("Start idx found:{start_idx}");
         let end_param = start_idx + param.len();
         //check bounds
         if input.len() > end_param + 2 {
             if &input[end_param..end_param + 2] == "=\"" {
                 let start = end_param + 2;
 
-                if let Some(end) = &input[start..].find("\"") {
-                    return Some(&input[start..start + end]);
+                let mut snippet = &input[start..];
+
+                // If we encounter a `\"` in the string we need to escape it
+                // This means that we need to create a new escaped string as it will be discontiguous
+                let mut escaped_buffer: Option<String> = None;
+
+                loop {
+                    if let Some(end) = memchr(b'"', snippet.as_bytes()) {
+                        // if we encounter a backslash before the quote
+                        if end > 0 && &snippet[end - 1..end] == "\\" {
+                            // We get an existing escaped buffer or create an empty string
+                            let mut buffer = escaped_buffer.unwrap_or_default();
+
+                            // push up until the escaped quote
+                            buffer.push_str(&snippet[..end - 1]);
+                            // push in the quote itself
+                            buffer.push('"');
+
+                            escaped_buffer = Some(buffer);
+
+                            // Move the buffer ahead
+                            snippet = &snippet[end + 1..];
+                            continue;
+                        } else {
+                            // we're at the end
+
+                            // if we have something escaped
+                            match escaped_buffer {
+                                Some(mut escaped) => {
+                                    // tack on the end of the string
+                                    escaped.push_str(&snippet[0..end]);
+
+                                    // Double escape with percent decode
+                                    if escaped.contains('%') {
+                                        let decoded_val =
+                                            percent_decode_str(&escaped).decode_utf8_lossy();
+                                        return Some(Cow::Owned(decoded_val.into_owned()));
+                                    }
+
+                                    return Some(Cow::Owned(escaped));
+                                }
+                                None => {
+                                    let value = &snippet[0..end];
+
+                                    // Escape with percent decode, if necessary
+                                    if value.contains('%') {
+                                        let decoded_val =
+                                            percent_decode_str(&value).decode_utf8_lossy();
+
+                                        return Some(decoded_val);
+                                    }
+
+                                    return Some(Cow::Borrowed(value));
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -429,7 +492,7 @@ where
                     }
                 }
                 State::ReadingHeader => {
-                    if let Some(end) = find_bytes(&buffer, b"\r\n\r\n") {
+                    if let Some(end) = find(&buffer, b"\r\n\r\n") {
                         //Need to include the end header bytes for the parse to work
                         let end = end + 4;
 
@@ -485,7 +548,7 @@ where
                     }
 
                     //We want to check the value of the buffer to see if there looks like there is an `end` boundary.
-                    if let Some(idx) = find_bytes(&buffer, boundary) {
+                    if let Some(idx) = find(&buffer, boundary) {
                         //Check the length has enough bytes for us
                         if buffer.len() < idx + 2 + boundary_len {
                             // FIXME: cannot stop the read successfully here!
@@ -537,7 +600,7 @@ where
 
                         let end_of_buffer = &buffer[start_idx..];
 
-                        if let Some(idx) = rfind_bytes(end_of_buffer, b"\r") {
+                        if let Some(idx) = memrchr(b'\r', end_of_buffer) {
                             //If to the end of the match equals the same amount of bytes
                             if &end_of_buffer[idx..] == &boundary[..(end_of_buffer.len() - idx)] {
                                 *state = State::StreamingContent(true);
@@ -604,8 +667,8 @@ mod tests {
         let mut stream = MultipartStream::new("AaB03x", ByteStream::new(input));
 
         if let Some(Ok(mut mpart_field)) = stream.next().await {
-            assert_eq!(mpart_field.name().ok(), Some("file"));
-            assert_eq!(mpart_field.filename().ok(), Some("text.txt"));
+            assert_eq!(mpart_field.name().ok(), Some(Cow::Borrowed("file")));
+            assert_eq!(mpart_field.filename().ok(), Some(Cow::Borrowed("text.txt")));
 
             if let Some(Ok(bytes)) = mpart_field.next().await {
                 assert_eq!(bytes, Bytes::from(b"Lorem Ipsum\n" as &[u8]));
@@ -617,12 +680,26 @@ mod tests {
 
     #[test]
     fn read_filename() {
-        let input = "form-data; name=\"file\"; filename=\"text.txt\"";
+        let input = "form-data; name=\"file\";\
+                           filename=\"text.txt\";\
+                           quoted=\"with a \\\" quote and another \\\" quote\";\
+                           empty=\"\"\
+                           percent_encoded=\"foo%20%3Cbar%3E\"\
+                           ";
         let name = get_dispo_param(input, "name");
         let filename = get_dispo_param(input, "filename");
+        let with_a_quote = get_dispo_param(input, "quoted");
+        let empty = get_dispo_param(input, "empty");
+        let percent_encoded = get_dispo_param(input, "percent_encoded");
 
-        assert_eq!(name, Some("file"));
-        assert_eq!(filename, Some("text.txt"));
+        assert_eq!(name, Some(Cow::Borrowed("file")));
+        assert_eq!(filename, Some(Cow::Borrowed("text.txt")));
+        assert_eq!(
+            with_a_quote,
+            Some(Cow::Owned("with a \" quote and another \" quote".into()))
+        );
+        assert_eq!(empty, Some(Cow::Borrowed("")));
+        assert_eq!(percent_encoded, Some(Cow::Borrowed("foo <bar>")));
     }
 
     #[tokio::test]
