@@ -60,7 +60,8 @@ where
     /// The returned filename will be utf8 percent-decoded
     pub fn filename<'a>(&'a self) -> Result<Cow<'a, str>, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
-            let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
+            let string_val =
+                std::str::from_utf8(val.as_bytes()).map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "filename") {
                 return Ok(filename);
             }
@@ -73,7 +74,8 @@ where
     /// The returned name will be utf8 percent-decoded
     pub fn name<'a>(&'a self) -> Result<Cow<'a, str>, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
-            let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
+            let string_val =
+                std::str::from_utf8(val.as_bytes()).map_err(|_| MultipartError::InvalidHeader)?;
             if let Some(filename) = get_dispo_param(&string_val, "name") {
                 return Ok(filename);
             }
@@ -102,7 +104,11 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<Cow<'a, str>> {
                 loop {
                     if let Some(end) = memchr(b'"', snippet.as_bytes()) {
                         // if we encounter a backslash before the quote
-                        if end > 0 && &snippet[end - 1..end] == "\\" {
+                        if end > 0
+                            && snippet
+                                .get(end - 1..end)
+                                .map_or(false, |character| character == "\\")
+                        {
                             // We get an existing escaped buffer or create an empty string
                             let mut buffer = escaped_buffer.unwrap_or_default();
 
@@ -646,6 +652,7 @@ mod tests {
     use super::*;
     use crate::client::ByteStream;
     use futures_util::StreamExt;
+    use warp::fs::file;
 
     #[tokio::test]
     async fn read_stream() {
@@ -694,6 +701,30 @@ mod tests {
 
         assert_eq!(name, Some(Cow::Borrowed("file")));
         assert_eq!(filename, Some(Cow::Borrowed("text.txt")));
+        assert_eq!(
+            with_a_quote,
+            Some(Cow::Owned("with a \" quote and another \" quote".into()))
+        );
+        assert_eq!(empty, Some(Cow::Borrowed("")));
+        assert_eq!(percent_encoded, Some(Cow::Borrowed("foo <bar>")));
+    }
+
+    #[test]
+    fn read_filename_umlaut() {
+        let input = "form-data; name=\"äöüß\";\
+                           filename=\"äöüß.txt\";\
+                           quoted=\"with a \\\" quote and another \\\" quote\";\
+                           empty=\"\"\
+                           percent_encoded=\"foo%20%3Cbar%3E\"\
+                           ";
+        let name = get_dispo_param(input, "name");
+        let filename = get_dispo_param(input, "filename");
+        let with_a_quote = get_dispo_param(input, "quoted");
+        let empty = get_dispo_param(input, "empty");
+        let percent_encoded = get_dispo_param(input, "percent_encoded");
+
+        assert_eq!(name, Some(Cow::Borrowed("äöüß")));
+        assert_eq!(filename, Some(Cow::Borrowed("äöüß.txt")));
         assert_eq!(
             with_a_quote,
             Some(Cow::Owned("with a \" quote and another \" quote".into()))
