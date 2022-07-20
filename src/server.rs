@@ -652,7 +652,6 @@ mod tests {
     use super::*;
     use crate::client::ByteStream;
     use futures_util::StreamExt;
-    use warp::fs::file;
 
     #[tokio::test]
     async fn read_stream() {
