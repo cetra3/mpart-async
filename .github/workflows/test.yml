@@ -22,10 +22,10 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --all -- --check
 
-      - name: Build
+      - name: Clippy
         uses: actions-rs/cargo@v1
         with:
-          command: build
+          command: clippy
 
       - name: Test
         uses: actions-rs/cargo@v1

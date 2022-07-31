@@ -12,7 +12,7 @@ use std::time::Duration;
 fn ten_megabytes_zero_byte(c: &mut Criterion) {
     let total_size = 1024 * 1024 * 10;
 
-    let (bytes, boundary) = bytes_and_boundary(&['\0' as u8; 1024 * 1024 * 10]);
+    let (bytes, boundary) = bytes_and_boundary(&[b'\0'; 1024 * 1024 * 10]);
 
     let mut group = c.benchmark_group("ten megabytes zero byte");
 
@@ -42,7 +42,7 @@ fn ten_megabytes_zero_byte(c: &mut Criterion) {
 fn ten_megabytes_r_byte(c: &mut Criterion) {
     let total_size = 1024 * 1024 * 10;
 
-    let (bytes, boundary) = bytes_and_boundary(&['\r' as u8; 1024 * 1024 * 10]);
+    let (bytes, boundary) = bytes_and_boundary(&[b'\r'; 1024 * 1024 * 10]);
 
     let mut group = c.benchmark_group("ten megabytes \\r byte");
 
@@ -74,7 +74,7 @@ fn ten_megabytes_random(c: &mut Criterion) {
 
     let mut bytes_mut = BytesMut::with_capacity(total_size);
 
-    bytes_mut.extend_from_slice(&['\0' as u8; 1024 * 1024 * 10]);
+    bytes_mut.extend_from_slice(&[b'\0'; 1024 * 1024 * 10]);
 
     thread_rng().fill_bytes(&mut bytes_mut);
 

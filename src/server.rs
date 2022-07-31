@@ -106,66 +106,64 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<Cow<'a, str>> {
         debug!("Start idx found:{start_idx}");
         let end_param = start_idx + param.len();
         //check bounds
-        if input.len() > end_param + 2 {
-            if &input[end_param..end_param + 2] == "=\"" {
-                let start = end_param + 2;
+        if input.len() > end_param + 2 && &input[end_param..end_param + 2] == "=\"" {
+            let start = end_param + 2;
 
-                let mut snippet = &input[start..];
+            let mut snippet = &input[start..];
 
-                // If we encounter a `\"` in the string we need to escape it
-                // This means that we need to create a new escaped string as it will be discontiguous
-                let mut escaped_buffer: Option<String> = None;
+            // If we encounter a `\"` in the string we need to escape it
+            // This means that we need to create a new escaped string as it will be discontiguous
+            let mut escaped_buffer: Option<String> = None;
 
-                while let Some(end) = memchr(b'"', snippet.as_bytes()) {
-                    // if we encounter a backslash before the quote
-                    if end > 0
-                        && snippet
-                            .get(end - 1..end)
-                            .map_or(false, |character| character == "\\")
-                    {
-                        // We get an existing escaped buffer or create an empty string
-                        let mut buffer = escaped_buffer.unwrap_or_default();
+            while let Some(end) = memchr(b'"', snippet.as_bytes()) {
+                // if we encounter a backslash before the quote
+                if end > 0
+                    && snippet
+                        .get(end - 1..end)
+                        .map_or(false, |character| character == "\\")
+                {
+                    // We get an existing escaped buffer or create an empty string
+                    let mut buffer = escaped_buffer.unwrap_or_default();
 
-                        // push up until the escaped quote
-                        buffer.push_str(&snippet[..end - 1]);
-                        // push in the quote itself
-                        buffer.push('"');
+                    // push up until the escaped quote
+                    buffer.push_str(&snippet[..end - 1]);
+                    // push in the quote itself
+                    buffer.push('"');
 
-                        escaped_buffer = Some(buffer);
+                    escaped_buffer = Some(buffer);
 
-                        // Move the buffer ahead
-                        snippet = &snippet[end + 1..];
-                        continue;
-                    } else {
-                        // we're at the end
+                    // Move the buffer ahead
+                    snippet = &snippet[end + 1..];
+                    continue;
+                } else {
+                    // we're at the end
 
-                        // if we have something escaped
-                        match escaped_buffer {
-                            Some(mut escaped) => {
-                                // tack on the end of the string
-                                escaped.push_str(&snippet[0..end]);
+                    // if we have something escaped
+                    match escaped_buffer {
+                        Some(mut escaped) => {
+                            // tack on the end of the string
+                            escaped.push_str(&snippet[0..end]);
 
-                                // Double escape with percent decode
-                                if escaped.contains('%') {
-                                    let decoded_val =
-                                        percent_decode_str(&escaped).decode_utf8_lossy();
-                                    return Some(Cow::Owned(decoded_val.into_owned()));
-                                }
-
-                                return Some(Cow::Owned(escaped));
+                            // Double escape with percent decode
+                            if escaped.contains('%') {
+                                let decoded_val =
+                                    percent_decode_str(&escaped).decode_utf8_lossy();
+                                return Some(Cow::Owned(decoded_val.into_owned()));
                             }
-                            None => {
-                                let value = &snippet[0..end];
 
-                                // Escape with percent decode, if necessary
-                                if value.contains('%') {
-                                    let decoded_val = percent_decode_str(value).decode_utf8_lossy();
+                            return Some(Cow::Owned(escaped));
+                        }
+                        None => {
+                            let value = &snippet[0..end];
 
-                                    return Some(decoded_val);
-                                }
+                            // Escape with percent decode, if necessary
+                            if value.contains('%') {
+                                let decoded_val = percent_decode_str(value).decode_utf8_lossy();
 
-                                return Some(Cow::Borrowed(value));
+                                return Some(decoded_val);
                             }
+
+                            return Some(Cow::Borrowed(value));
                         }
                     }
                 }

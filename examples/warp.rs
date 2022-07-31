@@ -40,5 +40,5 @@ async fn mpart(
         }
     }
 
-    Ok(format!("Thanks!\n"))
+    Ok("Thanks!\n".to_string())
 }

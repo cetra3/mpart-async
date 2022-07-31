@@ -18,7 +18,7 @@ enum State<S> {
     WritingField(MultipartField),
     WritingStream(MultipartStream<S>),
     WritingStreamHeader(MultipartStream<S>),
-    WritingFinished,
+    Finished,
 }
 
 /// The enum for multipart items which is either a field or a stream
@@ -130,7 +130,7 @@ where
         match self.items.pop_front() {
             Some(MultipartItems::Field(new_field)) => State::WritingField(new_field),
             Some(MultipartItems::Stream(new_stream)) => State::WritingStreamHeader(new_stream),
-            None => State::WritingFinished,
+            None => State::Finished,
         }
     }
 
@@ -288,7 +288,7 @@ where
                                     buf.extend_from_slice(&stream.write_header(&self_ref.boundary));
                                     new_state = Some(State::WritingStream(stream));
                                 }
-                                State::WritingFinished => {
+                                State::Finished => {
                                     debug!("Writing new Stream Finished");
                                     buf.extend_from_slice(&self_ref.write_ending());
                                 }
@@ -305,7 +305,7 @@ where
                         an_error @ Poll::Ready(Some(Err(_))) => return an_error,
                     }
                 }
-                State::WritingFinished => {
+                State::Finished => {
                     debug!("Writing Stream Finished");
                     bytes = Some(self_ref.write_ending());
                 }
