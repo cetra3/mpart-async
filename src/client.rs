@@ -58,16 +58,16 @@ impl<S> MultipartStream<S> {
         let mut buf = BytesMut::new();
 
         buf.extend_from_slice(b"--");
-        buf.extend_from_slice(&boundary.as_bytes());
+        buf.extend_from_slice(boundary.as_bytes());
         buf.extend_from_slice(b"\r\n");
 
         buf.extend_from_slice(b"Content-Disposition: form-data; name=\"");
-        buf.extend_from_slice(&self.name.as_bytes());
+        buf.extend_from_slice(self.name.as_bytes());
         buf.extend_from_slice(b"\"; filename=\"");
-        buf.extend_from_slice(&self.filename.as_bytes());
+        buf.extend_from_slice(self.filename.as_bytes());
         buf.extend_from_slice(b"\"\r\n");
         buf.extend_from_slice(b"Content-Type: ");
-        buf.extend_from_slice(&self.content_type.as_bytes());
+        buf.extend_from_slice(self.content_type.as_bytes());
         buf.extend_from_slice(b"\r\n");
 
         buf.extend_from_slice(b"\r\n");
@@ -89,16 +89,16 @@ impl MultipartField {
         let mut buf = BytesMut::new();
 
         buf.extend_from_slice(b"--");
-        buf.extend_from_slice(&boundary.as_bytes());
+        buf.extend_from_slice(boundary.as_bytes());
         buf.extend_from_slice(b"\r\n");
 
         buf.extend_from_slice(b"Content-Disposition: form-data; name=\"");
-        buf.extend_from_slice(&self.name.as_bytes());
+        buf.extend_from_slice(self.name.as_bytes());
         buf.extend_from_slice(b"\"\r\n");
 
         buf.extend_from_slice(b"\r\n");
 
-        buf.extend_from_slice(&self.value.as_bytes());
+        buf.extend_from_slice(self.value.as_bytes());
 
         buf.extend_from_slice(b"\r\n");
 
@@ -175,7 +175,7 @@ where
         let mut buf = BytesMut::new();
 
         buf.extend_from_slice(b"--");
-        buf.extend_from_slice(&self.boundary.as_bytes());
+        buf.extend_from_slice(self.boundary.as_bytes());
 
         buf.extend_from_slice(b"--\r\n");
 
@@ -335,7 +335,7 @@ where
             );
         }
 
-        return Poll::Ready(bytes.map(|bytes| Ok(bytes)));
+        Poll::Ready(bytes.map(|bytes| Ok(bytes)))
     }
 }
 
@@ -362,7 +362,7 @@ impl Stream for ByteStream {
     type Item = Result<Bytes, Infallible>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Poll::Ready(self.as_mut().bytes.take().map(|val| Ok(val)))
+        Poll::Ready(self.as_mut().bytes.take().map(Ok))
     }
 }
 

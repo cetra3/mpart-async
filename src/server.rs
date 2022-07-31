@@ -2,6 +2,7 @@ use bytes::{Bytes, BytesMut};
 use futures_core::Stream;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use httparse::Status;
+use log::debug;
 use pin_project_lite::pin_project;
 use std::borrow::Cow;
 use std::error::Error as StdError;
@@ -48,7 +49,7 @@ where
     }
 
     /// Return the content type of the field (if present or error)
-    pub fn content_type<'a>(&'a self) -> Result<&'a str, MultipartError> {
+    pub fn content_type(&self) -> Result<&str, MultipartError> {
         if let Some(val) = self.headers.get("content-type") {
             return val.to_str().map_err(|_| MultipartError::InvalidHeader);
         }
@@ -58,10 +59,15 @@ where
 
     /// Return the filename of the field (if present or error).
     /// The returned filename will be utf8 percent-decoded
-    pub fn filename<'a>(&'a self) -> Result<Cow<'a, str>, MultipartError> {
+    pub fn filename(&self) -> Result<Cow<str>, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
-            let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
-            if let Some(filename) = get_dispo_param(&string_val, "filename") {
+            let string_val =
+                std::str::from_utf8(val.as_bytes()).map_err(|_| MultipartError::InvalidHeader)?;
+            if let Some(filename) = get_dispo_param(string_val, "filename*") {
+                let stripped = strip_utf8_prefix(filename);
+                return Ok(stripped);
+            }
+            if let Some(filename) = get_dispo_param(string_val, "filename") {
                 return Ok(filename);
             }
         }
@@ -71,10 +77,11 @@ where
 
     /// Return the name of the field (if present or error).
     /// The returned name will be utf8 percent-decoded
-    pub fn name<'a>(&'a self) -> Result<Cow<'a, str>, MultipartError> {
+    pub fn name(&self) -> Result<Cow<str>, MultipartError> {
         if let Some(val) = self.headers.get("content-disposition") {
-            let string_val = val.to_str().map_err(|_| MultipartError::InvalidHeader)?;
-            if let Some(filename) = get_dispo_param(&string_val, "name") {
+            let string_val =
+                std::str::from_utf8(val.as_bytes()).map_err(|_| MultipartError::InvalidHeader)?;
+            if let Some(filename) = get_dispo_param(string_val, "name") {
                 return Ok(filename);
             }
         }
@@ -82,11 +89,21 @@ where
         Err(MultipartError::InvalidHeader)
     }
 }
-// This function will get a disposition param from `content-disposition` header & try to escape it if there are escaped quotes or percent encoding
+
+fn strip_utf8_prefix(string: Cow<str>) -> Cow<str> {
+    if string.starts_with("UTF-8''") || string.starts_with("utf-8''") {
+        let split = string.split_at(7).1;
+        return Cow::from(split.to_owned());
+    }
+
+    string
+}
+
+/// This function will get a disposition param from `content-disposition` header & try to escape it if there are escaped quotes or percent encoding
 fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<Cow<'a, str>> {
-    println!("dispo param:{input}, field `{param}`");
+    debug!("dispo param:{input}, field `{param}`");
     if let Some(start_idx) = find(input.as_bytes(), param.as_bytes()) {
-        eprintln!("Start idx found:{start_idx}");
+        debug!("Start idx found:{start_idx}");
         let end_param = start_idx + param.len();
         //check bounds
         if input.len() > end_param + 2 {
@@ -99,65 +116,64 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<Cow<'a, str>> {
                 // This means that we need to create a new escaped string as it will be discontiguous
                 let mut escaped_buffer: Option<String> = None;
 
-                loop {
-                    if let Some(end) = memchr(b'"', snippet.as_bytes()) {
-                        // if we encounter a backslash before the quote
-                        if end > 0 && &snippet[end - 1..end] == "\\" {
-                            // We get an existing escaped buffer or create an empty string
-                            let mut buffer = escaped_buffer.unwrap_or_default();
+                while let Some(end) = memchr(b'"', snippet.as_bytes()) {
+                    // if we encounter a backslash before the quote
+                    if end > 0
+                        && snippet
+                            .get(end - 1..end)
+                            .map_or(false, |character| character == "\\")
+                    {
+                        // We get an existing escaped buffer or create an empty string
+                        let mut buffer = escaped_buffer.unwrap_or_default();
 
-                            // push up until the escaped quote
-                            buffer.push_str(&snippet[..end - 1]);
-                            // push in the quote itself
-                            buffer.push('"');
+                        // push up until the escaped quote
+                        buffer.push_str(&snippet[..end - 1]);
+                        // push in the quote itself
+                        buffer.push('"');
 
-                            escaped_buffer = Some(buffer);
+                        escaped_buffer = Some(buffer);
 
-                            // Move the buffer ahead
-                            snippet = &snippet[end + 1..];
-                            continue;
-                        } else {
-                            // we're at the end
+                        // Move the buffer ahead
+                        snippet = &snippet[end + 1..];
+                        continue;
+                    } else {
+                        // we're at the end
 
-                            // if we have something escaped
-                            match escaped_buffer {
-                                Some(mut escaped) => {
-                                    // tack on the end of the string
-                                    escaped.push_str(&snippet[0..end]);
+                        // if we have something escaped
+                        match escaped_buffer {
+                            Some(mut escaped) => {
+                                // tack on the end of the string
+                                escaped.push_str(&snippet[0..end]);
 
-                                    // Double escape with percent decode
-                                    if escaped.contains('%') {
-                                        let decoded_val =
-                                            percent_decode_str(&escaped).decode_utf8_lossy();
-                                        return Some(Cow::Owned(decoded_val.into_owned()));
-                                    }
-
-                                    return Some(Cow::Owned(escaped));
+                                // Double escape with percent decode
+                                if escaped.contains('%') {
+                                    let decoded_val =
+                                        percent_decode_str(&escaped).decode_utf8_lossy();
+                                    return Some(Cow::Owned(decoded_val.into_owned()));
                                 }
-                                None => {
-                                    let value = &snippet[0..end];
 
-                                    // Escape with percent decode, if necessary
-                                    if value.contains('%') {
-                                        let decoded_val =
-                                            percent_decode_str(&value).decode_utf8_lossy();
+                                return Some(Cow::Owned(escaped));
+                            }
+                            None => {
+                                let value = &snippet[0..end];
 
-                                        return Some(decoded_val);
-                                    }
+                                // Escape with percent decode, if necessary
+                                if value.contains('%') {
+                                    let decoded_val = percent_decode_str(value).decode_utf8_lossy();
 
-                                    return Some(Cow::Borrowed(value));
+                                    return Some(decoded_val);
                                 }
+
+                                return Some(Cow::Borrowed(value));
                             }
                         }
-                    } else {
-                        break;
                     }
                 }
             }
         }
     }
 
-    return None;
+    None
 }
 
 //Streams out bytes
@@ -177,19 +193,17 @@ where
             .map_err(|_| MultipartError::InternalBorrowError)?;
 
         match Pin::new(&mut state.parser).poll_next(cx) {
-            Poll::Pending => return Poll::Pending,
+            Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Err(err))) => {
-                return Poll::Ready(Some(Err(MultipartError::Stream(err.into()))))
+                Poll::Ready(Some(Err(MultipartError::Stream(err.into()))))
             }
-            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Ready(None) => Poll::Ready(None),
             //If we have headers, we have reached the next file
             Poll::Ready(Some(Ok(ParseOutput::Headers(headers)))) => {
                 state.next_item = Some(headers);
-                return Poll::Ready(None);
+                Poll::Ready(None)
             }
-            Poll::Ready(Some(Ok(ParseOutput::Bytes(bytes)))) => {
-                return Poll::Ready(Some(Ok(bytes)))
-            }
+            Poll::Ready(Some(Ok(ParseOutput::Bytes(bytes)))) => Poll::Ready(Some(Ok(bytes))),
         }
     }
 }
@@ -298,20 +312,20 @@ where
         }
 
         match Pin::new(&mut state.parser).poll_next(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
-            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Some(Err(err))) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(None) => Poll::Ready(None),
 
             //If we have headers, we have reached the next file
             Poll::Ready(Some(Ok(ParseOutput::Headers(headers)))) => {
-                return Poll::Ready(Some(Ok(MultipartField {
+                Poll::Ready(Some(Ok(MultipartField {
                     headers,
                     state: self_mut.state.clone(),
-                })));
+                })))
             }
             Poll::Ready(Some(Ok(ParseOutput::Bytes(_bytes)))) => {
                 //If we are returning bytes from this stream, then there is some error
-                return Poll::Ready(Some(Err(MultipartError::ShouldPollField)));
+                Poll::Ready(Some(Err(MultipartError::ShouldPollField)))
             }
         }
     }
@@ -403,7 +417,7 @@ const NUM_HEADERS: usize = 16;
 fn get_headers(buffer: &[u8]) -> Result<HeaderMap<HeaderValue>, MultipartError> {
     let mut headers = [httparse::EMPTY_HEADER; NUM_HEADERS];
 
-    let idx = match httparse::parse_headers(&buffer, &mut headers)? {
+    let idx = match httparse::parse_headers(buffer, &mut headers)? {
         Status::Complete((idx, _val)) => idx,
         Status::Partial => return Err(MultipartError::IncompleteHeader),
     };
@@ -411,7 +425,7 @@ fn get_headers(buffer: &[u8]) -> Result<HeaderMap<HeaderValue>, MultipartError> 
     let mut header_map = HeaderMap::with_capacity(idx);
 
     for header in headers.iter().take(idx) {
-        if header.name != "" {
+        if !header.name.is_empty() {
             header_map.insert(
                 HeaderName::from_bytes(header.name.as_bytes())
                     .map_err(|_| MultipartError::InvalidHeader)?,
@@ -463,7 +477,7 @@ where
 
                     //If the buffer starts with `--<boundary>\r\n`
                     if &buffer[..2] == b"--"
-                        && &buffer[2..boundary_len + 2] == &*boundary
+                        && buffer[2..boundary_len + 2] == *boundary
                         && &buffer[boundary_len + 2..boundary_len + 4] == b"\r\n"
                     {
                         //remove the boundary from the buffer, returning the tail
@@ -474,14 +488,14 @@ where
                         let mut new_boundary = BytesMut::with_capacity(boundary_len + 4);
 
                         new_boundary.extend_from_slice(b"\r\n--");
-                        new_boundary.extend_from_slice(&boundary);
+                        new_boundary.extend_from_slice(boundary);
 
                         *boundary = new_boundary.freeze();
 
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     } else {
-                        let expected = format!("--{}\\r\\n", String::from_utf8_lossy(&boundary));
+                        let expected = format!("--{}\\r\\n", String::from_utf8_lossy(boundary));
                         let found =
                             String::from_utf8_lossy(&buffer[..boundary_len + 4]).to_string();
 
@@ -492,7 +506,7 @@ where
                     }
                 }
                 State::ReadingHeader => {
-                    if let Some(end) = find(&buffer, b"\r\n\r\n") {
+                    if let Some(end) = find(buffer, b"\r\n\r\n") {
                         //Need to include the end header bytes for the parse to work
                         let end = end + 4;
 
@@ -548,7 +562,7 @@ where
                     }
 
                     //We want to check the value of the buffer to see if there looks like there is an `end` boundary.
-                    if let Some(idx) = find(&buffer, boundary) {
+                    if let Some(idx) = find(buffer, boundary) {
                         //Check the length has enough bytes for us
                         if buffer.len() < idx + 2 + boundary_len {
                             // FIXME: cannot stop the read successfully here!
@@ -602,7 +616,7 @@ where
 
                         if let Some(idx) = memrchr(b'\r', end_of_buffer) {
                             //If to the end of the match equals the same amount of bytes
-                            if &end_of_buffer[idx..] == &boundary[..(end_of_buffer.len() - idx)] {
+                            if end_of_buffer[idx..] == boundary[..(end_of_buffer.len() - idx)] {
                                 *state = State::StreamingContent(true);
 
                                 //we return all the bytes except for the start of our boundary
@@ -678,10 +692,25 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn read_utf_8_filename() {
+        let input: &[u8] = b"--AaB03x\r\n\
+                Content-Disposition: form-data; name=\"file\"; filename=\"text.txt\"; filename*=\"aous%20.txt\"\r\n\
+                Content-Type: text/plain\r\n\
+                \r\n\
+                Lorem Ipsum\n\r\n\
+                --AaB03x--\r\n";
+
+        let mut stream = MultipartStream::new("AaB03x", ByteStream::new(input));
+
+        let field = stream.next().await.unwrap().unwrap();
+        assert_eq!(field.filename().ok(), Some(Cow::Borrowed("aous .txt")));
+    }
+
     #[test]
     fn read_filename() {
         let input = "form-data; name=\"file\";\
-                           filename=\"text.txt\";\
+                           filename=\"text%20.txt\";\
                            quoted=\"with a \\\" quote and another \\\" quote\";\
                            empty=\"\"\
                            percent_encoded=\"foo%20%3Cbar%3E\"\
@@ -693,7 +722,31 @@ mod tests {
         let percent_encoded = get_dispo_param(input, "percent_encoded");
 
         assert_eq!(name, Some(Cow::Borrowed("file")));
-        assert_eq!(filename, Some(Cow::Borrowed("text.txt")));
+        assert_eq!(filename, Some(Cow::Borrowed("text .txt")));
+        assert_eq!(
+            with_a_quote,
+            Some(Cow::Owned("with a \" quote and another \" quote".into()))
+        );
+        assert_eq!(empty, Some(Cow::Borrowed("")));
+        assert_eq!(percent_encoded, Some(Cow::Borrowed("foo <bar>")));
+    }
+
+    #[test]
+    fn read_filename_umlaut() {
+        let input = "form-data; name=\"äöüß\";\
+                           filename*=\"äöü ß%20.txt\";\
+                           quoted=\"with a \\\" quote and another \\\" quote\";\
+                           empty=\"\"\
+                           percent_encoded=\"foo%20%3Cbar%3E\"\
+                           ";
+        let name = get_dispo_param(input, "name");
+        let filename = get_dispo_param(input, "filename*");
+        let with_a_quote = get_dispo_param(input, "quoted");
+        let empty = get_dispo_param(input, "empty");
+        let percent_encoded = get_dispo_param(input, "percent_encoded");
+
+        assert_eq!(name, Some(Cow::Borrowed("äöüß")));
+        assert_eq!(filename, Some(Cow::Borrowed("äöü ß .txt")));
         assert_eq!(
             with_a_quote,
             Some(Cow::Owned("with a \" quote and another \" quote".into()))
@@ -977,5 +1030,32 @@ mod tests {
         assert!(nth.is_none());
 
         assert_eq!(buffer.as_ref(), b"\r\r\r\r\r\r\r\r\r\r\r\r\r");
+    }
+
+    #[test]
+    fn test_strip_no_strip_necessary() {
+        let name: Cow<str> = Cow::Owned("äöüß.txt".to_owned());
+
+        let res = strip_utf8_prefix(name.clone());
+
+        assert_eq!(res, name);
+    }
+
+    #[test]
+    fn test_strip_uppercase_utf8() {
+        let name: Cow<str> = Cow::Owned("UTF-8''äöüß.txt".to_owned());
+
+        let res = strip_utf8_prefix(name);
+
+        assert_eq!(res, "äöüß.txt");
+    }
+
+    #[test]
+    fn test_strip_lowercase_utf8() {
+        let name: Cow<str> = Cow::Owned("utf-8''äöüß.txt".to_owned());
+
+        let res = strip_utf8_prefix(name);
+
+        assert_eq!(res, "äöüß.txt");
     }
 }

@@ -44,16 +44,14 @@ impl Stream for FileStream {
             return Pin::new(stream)
                 .poll_next(cx)
                 .map(|val| val.map(|val| val.map(|val| val.freeze())));
-        } else {
-            if let Poll::Ready(file_result) = self.file.as_mut().poll(cx) {
-                match file_result {
-                    Ok(file) => {
-                        self.inner = Some(FramedRead::new(file, BytesCodec::new()));
-                        cx.waker().wake_by_ref();
-                    }
-                    Err(err) => {
-                        return Poll::Ready(Some(Err(err)));
-                    }
+        } else if let Poll::Ready(file_result) = self.file.as_mut().poll(cx) {
+            match file_result {
+                Ok(file) => {
+                    self.inner = Some(FramedRead::new(file, BytesCodec::new()));
+                    cx.waker().wake_by_ref();
+                }
+                Err(err) => {
+                    return Poll::Ready(Some(Err(err)));
                 }
             }
         }
