@@ -146,8 +146,7 @@ fn get_dispo_param<'a>(input: &'a str, param: &str) -> Option<Cow<'a, str>> {
 
                             // Double escape with percent decode
                             if escaped.contains('%') {
-                                let decoded_val =
-                                    percent_decode_str(&escaped).decode_utf8_lossy();
+                                let decoded_val = percent_decode_str(&escaped).decode_utf8_lossy();
                                 return Some(Cow::Owned(decoded_val.into_owned()));
                             }
 
