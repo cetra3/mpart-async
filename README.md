@@ -104,3 +104,8 @@ async fn mpart(
     Ok(format!("Thanks!\n"))
 }
 ```
+
+To interact with the server:
+```bash
+curl -F test=field -F file=@file.txt http://localhost:3030/
+```
