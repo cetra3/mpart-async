@@ -657,6 +657,7 @@ mod tests {
     use super::*;
     use crate::client::ByteStream;
     use futures_util::StreamExt;
+    use std::{collections::HashMap, io, time};
 
     #[tokio::test]
     async fn read_stream() {
@@ -1027,6 +1028,184 @@ mod tests {
         assert!(nth.is_none());
 
         assert_eq!(buffer.as_ref(), b"\r\r\r\r\r\r\r\r\r\r\r\r\r");
+    }
+
+    #[tokio::test]
+    async fn field_boundary_finding_should_not_cause_busy_exhausted_loop_1() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stream = StreamFromChannel::new(receiver);
+        send_multipart_message_in_neat_chunks(sender);
+        assert_no_busy_exhausted_loop(stream).await;
+    }
+
+    #[tokio::test]
+    async fn field_boundary_finding_should_not_cause_busy_exhausted_loop_2() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stream = StreamFromChannel::new(receiver);
+        send_multipart_message_in_not_so_neat_chunks(sender);
+        assert_no_busy_exhausted_loop(stream).await;
+    }
+
+    #[tokio::test]
+    async fn empty_field_data_chunk_should_indicate_end_of_field_1() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stream = StreamFromChannel::new(receiver);
+        send_multipart_message_in_neat_chunks(sender);
+        assert_empty_field_data_chunk_indicates_end_of_field(stream).await;
+    }
+
+    #[tokio::test]
+    async fn empty_field_data_chunk_should_indicate_end_of_field_2() {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let stream = StreamFromChannel::new(receiver);
+        send_multipart_message_in_not_so_neat_chunks(sender);
+        assert_empty_field_data_chunk_indicates_end_of_field(stream).await;
+    }
+
+    fn send_multipart_message_in_neat_chunks(
+        sender: tokio::sync::mpsc::UnboundedSender<&'static [u8]>,
+    ) {
+        tokio::task::spawn(async move {
+            // Send first chunk of a multipart message. The first chunk ends neatly exactly where the
+            // field value of the first field ends.
+            sender
+                .send(
+                    b"--abc\r
+Content-Disposition: form-data; name=\"field1\"\r
+\r
+foo",
+                )
+                .unwrap();
+
+            tokio::time::sleep(time::Duration::from_millis(1)).await;
+
+            // Send the remainder of the message.
+            sender
+                .send(
+                    b"\r
+--abc\r
+Content-Disposition: form-data; name=\"field2\"\r
+\r
+bar\r
+--abc--\r
+",
+                )
+                .unwrap();
+        });
+    }
+
+    fn send_multipart_message_in_not_so_neat_chunks(
+        sender: tokio::sync::mpsc::UnboundedSender<&'static [u8]>,
+    ) {
+        tokio::task::spawn(async move {
+            // Send first chunk of a multipart message. The first chunk ends with a carriage return
+            // which is not enough to determine the end of the field.
+            sender
+                .send(
+                    b"--abc\r
+Content-Disposition: form-data; name=\"field1\"\r
+\r
+foo\r",
+                )
+                .unwrap();
+
+            tokio::time::sleep(time::Duration::from_millis(1)).await;
+
+            // Send the remainder of the message.
+            sender
+                .send(
+                    b"
+--abc\r
+Content-Disposition: form-data; name=\"field2\"\r
+\r
+bar\r
+--abc--\r
+",
+                )
+                .unwrap();
+        });
+    }
+
+    async fn assert_no_busy_exhausted_loop(stream: StreamFromChannel) {
+        let mut fields = HashMap::new();
+        let mut empty_data_chunk_count: u8 = 0;
+        let mut mpart = MultipartStream::new("abc", stream);
+        while let Some(result) = mpart.next().await {
+            let mut field = result.unwrap();
+
+            let mut field_data: Vec<u8> = Vec::new();
+            while let Some(result) = field.next().await {
+                let field_data_chunk = result.unwrap();
+
+                if field_data_chunk.is_empty() {
+                    empty_data_chunk_count = empty_data_chunk_count.saturating_add(1);
+                    continue;
+                }
+
+                field_data.extend_from_slice(&field_data_chunk);
+            }
+
+            let _ = fields.insert(
+                field.name().unwrap().to_string(),
+                String::from_utf8(field_data).unwrap(),
+            );
+        }
+
+        assert_eq!(fields.get("field1"), Some(&String::from("foo")));
+        assert_eq!(fields.get("field2"), Some(&String::from("bar")));
+        assert_eq!(empty_data_chunk_count, 1);
+    }
+
+    async fn assert_empty_field_data_chunk_indicates_end_of_field(stream: StreamFromChannel) {
+        let mut fields = HashMap::new();
+        let mut empty_data_chunk_count: u8 = 0;
+        let mut mpart = MultipartStream::new("abc", stream);
+        while let Some(result) = mpart.next().await {
+            let mut field = result.unwrap();
+
+            let mut field_data: Vec<u8> = Vec::new();
+            while let Some(result) = field.next().await {
+                let field_data_chunk = result.unwrap();
+
+                if field_data_chunk.is_empty() {
+                    empty_data_chunk_count = empty_data_chunk_count.saturating_add(1);
+                    break;
+                }
+
+                field_data.extend_from_slice(&field_data_chunk);
+            }
+
+            let _ = fields.insert(
+                field.name().unwrap().to_string(),
+                String::from_utf8(field_data).unwrap(),
+            );
+        }
+
+        assert_eq!(fields.get("field1"), Some(&String::from("foo")));
+        assert_eq!(fields.get("field2"), Some(&String::from("bar")));
+        assert_eq!(empty_data_chunk_count, 1);
+    }
+
+    struct StreamFromChannel {
+        receiver: tokio::sync::mpsc::UnboundedReceiver<&'static [u8]>,
+    }
+
+    impl StreamFromChannel {
+        fn new(receiver: tokio::sync::mpsc::UnboundedReceiver<&'static [u8]>) -> Self {
+            Self { receiver }
+        }
+    }
+
+    impl futures_core::Stream for StreamFromChannel {
+        type Item = io::Result<Bytes>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.receiver.poll_recv(cx) {
+                Poll::Ready(Some(buf)) => Poll::Ready(Some(Ok(Bytes::from_static(buf)))),
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
+            }
+        }
     }
 
     #[test]
